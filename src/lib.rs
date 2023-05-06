@@ -4,6 +4,9 @@ use crate::queue::Queue;
 
 pub mod queue;
 
+pub trait MVSynced: Send + Sync + 'static {}
+impl<T> MVSynced for T where T: Send + Sync + 'static {}
+
 pub struct MVSync {
     id: u64,
     specs: MVSyncSpecs,
