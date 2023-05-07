@@ -1,18 +1,19 @@
+use std::ops::Deref;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use mvutils::id_eq;
 use mvutils::utils::next_id;
 
 pub struct Semaphore {
     id: u64,
-    timeout: u32,
     signaled: bool
 }
 
 impl Semaphore {
-    pub(crate) fn new(timeout: u32) -> Semaphore {
+    pub(crate) fn new() -> Semaphore {
         Semaphore {
             id: next_id("MVSync"),
-            timeout,
             signaled: false
         }
     }
@@ -23,15 +24,6 @@ impl Semaphore {
 
     pub(crate) fn ready(&self) -> bool {
         self.signaled
-    }
-
-    pub(crate) fn wait(&self) {
-        loop {
-            if self.signaled {
-                break;
-            }
-            thread::sleep(Duration::from_millis(self.timeout as u64));
-        }
     }
 }
 
@@ -68,22 +60,27 @@ impl Fence {
     }
 }
 
+id_eq!(Semaphore, Fence);
+
 pub(crate) enum Signal {
-    Semaphore(Semaphore),
-    Fence(Fence)
+    Semaphore(Arc<Semaphore>),
+    Fence(Arc<Fence>)
 }
 
 impl Signal {
-    pub(crate) fn signal(&self) {
-        unsafe {
-            (self as *const Signal).cast_mut().as_mut().unwrap().inner_signal();
-        }
-    }
-
-    fn inner_signal(&mut self) {
+    pub(crate) fn signal(self) {
         match self {
-            Signal::Semaphore(s) => s.signal(),
-            Signal::Fence(s) => s.open()
+            Signal::Semaphore(s) => unsafe {
+                (s.deref() as *const Semaphore).cast_mut().as_mut().unwrap().signal()
+            }
+            Signal::Fence(s) => unsafe {
+                (s.deref() as *const Fence).cast_mut().as_mut().unwrap().open()
+            }
         }
     }
+}
+
+pub enum SemaphoreUsage {
+    Wait,
+    Signal
 }

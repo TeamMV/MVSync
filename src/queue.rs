@@ -1,36 +1,33 @@
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
-use futures::task::{LocalSpawnExt, SpawnExt};
-use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, channel};
+use futures::task::SpawnExt;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded as channel};
 use futures::{SinkExt, StreamExt};
 use futures::executor::{LocalPool, LocalSpawner};
 use futures_timer::Delay;
 use mvutils::id_eq;
 use mvutils::utils::next_id;
+use crate::block::AwaitSync;
+use crate::command_buffers::buffer::CommandBuffer;
 use crate::MVSyncSpecs;
 use crate::task::Task;
 
 pub struct Queue {
     id: u64,
     sender: Sender<Task>,
-    manager: JoinHandle<()>,
-    specs: MVSyncSpecs
 }
 
 impl Queue {
     pub(crate) fn new(specs: MVSyncSpecs) -> Self {
         let (sender, receiver) = unbounded();
         let threads = (0..specs.thread_count).map(|_| WorkerThread::new(specs)).collect();
-        let manager = thread::spawn(move || Self::run(receiver, threads, specs));
+        let _manager = thread::spawn(move || Self::run(receiver, threads, specs));
         Queue {
             id: next_id("MVSync"),
-            sender,
-            manager,
-            specs
+            sender
         }
     }
 
@@ -39,63 +36,70 @@ impl Queue {
             workers.iter().max_by_key(|w| w.free_workers()).unwrap()
         }
 
-        let mut pool = LocalPool::new();
-
-        let listener = async move {
-            let mut tasks = Vec::new();
-            loop {
-                let task = receiver.try_recv();
-                match task {
-                    Ok(task) => tasks.push(task),
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => break
-                }
-                for i in 0..tasks.len() {
-                    if tasks[i].can_execute() {
-                        let thread = optimal(&threads);
-                        if thread.free_workers() == 0 {
-                            break;
-                        }
-                        thread.get_sender().send(tasks.remove(i)).await.expect("Failed to send task!");
-                    }
-                }
-                Delay::new(Duration::from_millis(specs.timeout_ms as u64)).await;
+        let mut tasks = Vec::new();
+        loop {
+            let task = receiver.try_recv();
+            match task {
+                Ok(task) => tasks.push(task),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => break
             }
-        };
-        pool.run_until(listener);
+            for i in 0..tasks.len() {
+                if i >= tasks.len() {
+                    break;
+                }
+                if tasks[i].can_execute() {
+                    let thread = optimal(&threads);
+                    if thread.free_workers() == 0 {
+                        break;
+                    }
+                    thread.get_sender().send(tasks.remove(i)).await_sync().expect("Failed to send task!");
+                }
+            }
+            Delay::new(Duration::from_millis(specs.timeout_ms as u64)).await_sync();
+        }
+    }
+
+    pub fn submit(&self, task: Task) {
+        self.sender.send(task).expect("Failed to submit task!");
+    }
+
+    //#[cfg(feature = "command-buffers")]
+    pub fn submit_command_buffer(&self, command_buffer: CommandBuffer) {
+        for task in command_buffer.tasks() {
+            self.sender.send(task).expect("Failed to submit command buffer!");
+        }
     }
 
     pub fn push(&self, f: impl FnOnce() + Send + 'static) {
-        self.sender.send(Task::new(async move { f() }, vec![], vec![])).expect("Failed to submit task!");
+        self.sender.send(Task::new(async move { f() })).expect("Failed to submit task!");
     }
 
     pub fn push_async(&self, f: impl Future<Output = ()> + Send + 'static) {
-        self.sender.send(Task::new(f, vec![], vec![])).expect("Failed to submit task!");
+        self.sender.send(Task::new(f)).expect("Failed to submit task!");
     }
 }
 
 struct WorkerThread {
     id: u64,
-    sender: AsyncSender<Task>,
-    free_workers: Arc<RwLock<u32>>,
-    thread: JoinHandle<()>,
+    sender: UnboundedSender<Task>,
+    free_workers: Arc<RwLock<u32>>
 }
 
 impl WorkerThread {
     fn new(specs: MVSyncSpecs) -> Self {
-        let (sender, receiver) = channel(specs.workers_per_thread as usize);
+        let (sender, receiver) = channel();
         let free_workers = Arc::new(RwLock::new(specs.workers_per_thread));
         let access = free_workers.clone();
-        let thread = thread::spawn(move || Self::run(receiver, access));
+        let _thread = thread::spawn(move || Self::run(receiver, access));
         WorkerThread {
             id: next_id("MVSync"),
             sender,
-            free_workers,
-            thread
+            free_workers
         }
     }
 
-    fn run(mut receiver: AsyncReceiver<Task>, free_workers: Arc<RwLock<u32>>) {
+    fn run(mut receiver: UnboundedReceiver<Task>, free_workers: Arc<RwLock<u32>>) {
         let mut pool = LocalPool::new();
         let ptr = (&pool.spawner() as *const LocalSpawner) as usize;
         let dispatcher = async move {
@@ -109,13 +113,11 @@ impl WorkerThread {
                 }).expect("Failed to spawn task!");
             }
         };
-        pool.spawner().spawn(async move {
-            dispatcher.await;
-        }).expect("Failed to spawn task dispatcher!");
+        pool.spawner().spawn(dispatcher).expect("Failed to spawn task dispatcher!");
         pool.run();
     }
 
-    fn get_sender(&self) -> AsyncSender<Task> {
+    fn get_sender(&self) -> UnboundedSender<Task> {
         self.sender.clone()
     }
 
