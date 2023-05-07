@@ -116,7 +116,7 @@ impl<T: MVSynced> TaskResult<T> {
     }
 
     pub fn is_done(&self) -> bool {
-        self.inner.read().unwrap().is_some()
+        Arc::strong_count(&self.inner) == 1
     }
 
     pub fn wait(self) -> Option<T> {

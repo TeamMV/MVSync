@@ -173,7 +173,7 @@ mod tests {
 
         let task2 = command_buffer
             .gen_string(|| async move {
-                Delay::new(Duration::from_millis( 1000)).await;
+                Delay::new(Duration::from_millis( 500)).await;
                 "World".to_string()
             })
             .print()
