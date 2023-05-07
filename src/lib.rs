@@ -2,16 +2,20 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 use mvutils::id_eq;
 use mvutils::utils::next_id;
-use crate::command_buffers::buffer::{CommandBuffer, CommandBufferAllocationError};
 use crate::queue::Queue;
 use crate::sync::{Fence, Semaphore};
 use crate::task::{Task, TaskResult};
+
+#[cfg(feature = "command-buffers")]
+use crate::command_buffers::buffer::{CommandBuffer, CommandBufferAllocationError};
+
+pub mod prelude;
 
 pub mod queue;
 pub mod task;
 pub mod sync;
 pub mod block;
-//#[cfg(feature = "command-buffers")]
+#[cfg(feature = "command-buffers")]
 pub mod command_buffers;
 
 pub trait MVSynced: Send + Sync + 'static {}
@@ -45,7 +49,7 @@ impl MVSync {
         Arc::new(Fence::new(self.specs.timeout_ms))
     }
 
-    //#[cfg(feature = "command-buffers")]
+    #[cfg(feature = "command-buffers")]
     pub fn allocate_command_buffer(&self) -> Result<CommandBuffer, CommandBufferAllocationError> {
         CommandBuffer::new(self.specs.timeout_ms)
     }
@@ -104,6 +108,7 @@ impl Default for MVSyncSpecs {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {

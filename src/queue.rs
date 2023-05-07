@@ -11,9 +11,11 @@ use futures_timer::Delay;
 use mvutils::id_eq;
 use mvutils::utils::next_id;
 use crate::block::AwaitSync;
-use crate::command_buffers::buffer::CommandBuffer;
 use crate::MVSyncSpecs;
 use crate::task::Task;
+
+#[cfg(feature = "command-buffers")]
+use crate::command_buffers::buffer::CommandBuffer;
 
 pub struct Queue {
     id: u64,
@@ -64,7 +66,7 @@ impl Queue {
         self.sender.send(task).expect("Failed to submit task!");
     }
 
-    //#[cfg(feature = "command-buffers")]
+    #[cfg(feature = "command-buffers")]
     pub fn submit_command_buffer(&self, command_buffer: CommandBuffer) {
         for task in command_buffer.tasks() {
             self.sender.send(task).expect("Failed to submit command buffer!");
