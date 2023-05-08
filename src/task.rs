@@ -10,6 +10,10 @@ use crate::block::AwaitSync;
 use crate::MVSynced;
 use crate::sync::{Fence, Semaphore, SemaphoreUsage, Signal};
 
+/// A wrapper around a function, which can be synchronous or asynchronous, can return a value and take
+/// input parameters.
+///
+/// This type must be used to submit tasks to the [`Queue`].
 pub struct Task {
     id: u64,
     inner: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
@@ -79,6 +83,7 @@ impl Task {
         })
     }
 
+    /// Bind a [`Semaphore`] to this task, the usage will specify whether to wait for the semaphore, or signal it.
     pub fn bind_semaphore(&mut self, semaphore: Arc<Semaphore>, usage: SemaphoreUsage) {
         match usage {
             SemaphoreUsage::Wait => self.wait.push(semaphore),
@@ -86,6 +91,7 @@ impl Task {
         }
     }
 
+    /// Bind a [`Fence`] to this task, which will open when this task finishes.
     pub fn bind_fence(&mut self, fence: Arc<Fence>) {
         self.signal.push(Signal::Fence(fence));
     }
@@ -96,7 +102,9 @@ impl Task {
 
     pub(crate) async fn execute(self) {
         (self.inner).await;
-        self.signal.into_iter().for_each(|s| s.signal());
+        for signal in self.signal {
+            signal.signal();
+        }
     }
 }
 

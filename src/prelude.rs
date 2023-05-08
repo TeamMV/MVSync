@@ -5,4 +5,4 @@ pub use crate::sync::{Fence, Semaphore};
 pub use crate::task::{Task, TaskResult};
 
 #[cfg(feature = "command-buffers")]
-pub use crate::command_buffers::buffer::CommandBuffer;
+pub use crate::command_buffers::buffer::{CommandBuffer, BufferedCommand, Command};

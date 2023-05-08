@@ -3,6 +3,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 pub trait AwaitSync: Future + Sized {
+    /// Poll a future to completion, blocking the current thread until it is done.
     fn await_sync(self) -> Self::Output { await_sync(self) }
 }
 
@@ -50,6 +51,7 @@ impl Wake for Signal {
     }
 }
 
+/// Poll a future to completion, blocking the current thread until it is done.
 pub fn await_sync<R>(mut future: impl Future<Output = R>) -> R {
     let mut future = unsafe { std::pin::Pin::new_unchecked(&mut future) };
     let signal = Arc::new(Signal { state: Mutex::new(State::Ready), condition: Condvar::new() });

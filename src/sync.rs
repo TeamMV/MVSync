@@ -5,6 +5,13 @@ use std::time::Duration;
 use mvutils::id_eq;
 use mvutils::utils::next_id;
 
+/// A sync object used to add control flow to tasks. It is an internal sync object, meaning it can
+/// only be read from within a task. If a task depends on another one to finish, you should use a
+/// Semaphore to force the task to wait for the dependency to finish.
+///
+/// # Note
+/// If a semaphore is bound to multiple tasks, it will signal as soon as the first task finishes.
+/// Counter semaphores are planned to be added in the future.
 pub struct Semaphore {
     id: u64,
     signaled: bool
@@ -27,6 +34,14 @@ impl Semaphore {
     }
 }
 
+/// A sync object used to wait for tasks. It is an external sync object, meaning it can
+/// only be read from outside tasks. If you need to await a task whose result was passed into
+/// another task, or you need to share a task "handle" without sharing the result, you should
+/// use a Fence.
+///
+/// # Note
+/// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
+/// Counter fences are planned to be added in the future.
 pub struct Fence {
     id: u64,
     timeout: u32,
@@ -46,10 +61,23 @@ impl Fence {
         self.open = true;
     }
 
+    /// Check if the fence is open.
+    ///
+    /// If this returns `true`, the task that signalled the fence has already finished.
+    ///
+    /// # Note
+    /// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
+    /// Counter fences are planned to be added in the future.
     pub fn ready(&self) -> bool {
         self.open
     }
 
+    /// Block the current thread until the fence is signaled, indicating that the task
+    /// this fence is bound to has finished.
+    ///
+    /// # Note
+    /// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
+    /// Counter fences are planned to be added in the future.
     pub fn wait(&self) {
         loop {
             if self.open {
@@ -81,6 +109,8 @@ impl Signal {
 }
 
 pub enum SemaphoreUsage {
+    /// Wait for the semaphore to be signaled.
     Wait,
+    /// Signal the semaphore upon completion.
     Signal
 }

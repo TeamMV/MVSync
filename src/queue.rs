@@ -17,6 +17,11 @@ use crate::task::Task;
 #[cfg(feature = "command-buffers")]
 use crate::command_buffers::buffer::CommandBuffer;
 
+/// The MVSync queue. A single queue exists per MVSync instance. It is ran on its own thread, and
+/// distributes tasks efficiently between threads that are allocated to MVSync.
+///
+/// If a task that is submitted is waiting on a semaphore, it will not be submitted until it is ready,
+/// to prevent the workers from being clogged by functions that are waiting for other functions.
 pub struct Queue {
     id: u64,
     sender: Sender<Task>,
@@ -62,23 +67,30 @@ impl Queue {
         }
     }
 
+    /// Submit a task to the queue. This will push the task to the back of the queue. When there is
+    /// a free worker available, the task will be popped off the queue and executed by the worker.
+    ///
+    /// # Arguments
+    /// task - The task to push to the back of the queue.
     pub fn submit(&self, task: Task) {
         self.sender.send(task).expect("Failed to submit task!");
     }
 
+    /// Submit a command buffer to the queue. This will push the tasks to the back of the queue in
+    /// the same order you called them on the buffer. When there is a free worker available, each
+    /// task will be popped off the queue and executed by the worker sequentially. Tasks that require
+    /// other tasks to finish will not be popped until they are ready, so no tasks will clog the queue.
+    ///
+    /// # Panics
+    /// If the command buffer is not baked.
+    ///
+    /// # Arguments
+    /// command_buffer - The command buffer to push to the back of the queue.
     #[cfg(feature = "command-buffers")]
     pub fn submit_command_buffer(&self, command_buffer: CommandBuffer) {
         for task in command_buffer.tasks() {
             self.sender.send(task).expect("Failed to submit command buffer!");
         }
-    }
-
-    pub fn push(&self, f: impl FnOnce() + Send + 'static) {
-        self.sender.send(Task::new(async move { f() })).expect("Failed to submit task!");
-    }
-
-    pub fn push_async(&self, f: impl Future<Output = ()> + Send + 'static) {
-        self.sender.send(Task::new(f)).expect("Failed to submit task!");
     }
 }
 
