@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;

@@ -174,9 +174,8 @@ mod tests {
     use std::time::Duration;
     use futures_timer::Delay;
     use crate::{MVSync, MVSyncSpecs};
-    use crate::command_buffers::buffer::{BufferedCommand, Command, CommandBuffer, CommandBufferEntry};
+    use crate::command_buffers::buffer::{BufferedCommand, Command, CommandBufferEntry};
     use crate::command_buffers::commands::Print;
-    use crate::task::TaskResult;
 
     trait GenString: CommandBufferEntry {
         fn gen_string<F: Future<Output = String>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<String> {
