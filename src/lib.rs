@@ -18,15 +18,11 @@
 //!
 //! - [`block`]\: Very simple 'poll to completion' awaiter. (Adapted from [`pollster`])
 //!
-//! - [`command-buffers`]\: A higher-level API abstraction layer, which allows making custom tasks,
+//! - [`command buffers`]\: A higher-level API abstraction layer, which allows making custom tasks,
 //! as well as chaining tasks.
 //!
-//! [`queue`]: queue
-//! [`task`]: task
-//! [`sync`]: sync
-//! [`block`]: block
 //! [`pollster`]: https://crates.io/crates/pollster
-//! [`command-buffers`]: command_buffers
+//! [`command buffers`]: command_buffers
 
 use std::future::Future;
 use std::sync::{Arc, RwLock};
@@ -175,10 +171,10 @@ mod tests {
     use futures_timer::Delay;
     use crate::{MVSync, MVSyncSpecs};
     use crate::command_buffers::buffer::{BufferedCommand, Command, CommandBufferEntry};
-    use crate::command_buffers::commands::Print;
+    use crate::command_buffers::commands::{Dbg, Print, Unwrap};
 
     trait GenString: CommandBufferEntry {
-        fn gen_string<F: Future<Output = String>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<String> {
+        fn gen_string<F: Future<Output = Option<String>>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<Option<String>> {
             self.add_command(function)
         }
     }
@@ -199,17 +195,18 @@ mod tests {
         let task = command_buffer
             .gen_string(|| async move {
                 Delay::new(Duration::from_millis(1000)).await;
-                "Hello".to_string()
+                Some("Hello".to_string())
             })
+            .unwrap()
             .print()
             .response();
 
         let task2 = command_buffer
             .gen_string(|| async move {
                 Delay::new(Duration::from_millis(500)).await;
-                "World".to_string()
+                Some("World".to_string())
             })
-            .print()
+            .dbg()
             .response();
 
         command_buffer.finish();

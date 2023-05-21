@@ -108,6 +108,7 @@ impl Task {
     }
 }
 
+/// A wrapper for getting the return value of a [`Task`] that has no successors once it has finished.
 pub struct TaskResult<T: MVSynced> {
     id: u64,
     timeout: u32,
@@ -123,10 +124,14 @@ impl<T: MVSynced> TaskResult<T> {
         }
     }
 
+    /// Returns whether the [`Task`] has finished executing.
     pub fn is_done(&self) -> bool {
         Arc::strong_count(&self.inner) == 1
     }
 
+    /// Waits until the [`Task`] has finished executing, and return the result of the task. If the [`Task`],
+    /// or any of its predecessors, have panicked, this function will return [`None`], otherwise, it will
+    /// return [`Some(T)`].
     pub fn wait(self) -> Option<T> {
         loop {
             if Arc::strong_count(&self.inner) == 1 {

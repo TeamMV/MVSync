@@ -310,7 +310,13 @@ id_eq!(CommandBuffer);
 
 sealed!(
     pub trait CommandBufferEntry {
+        /// Add a command and continue the command chain, returning the result of the command wrapped in
+        /// a buffered command. Do not call this function directly unless you are defining you own commands.
+        /// This is the same as [`add_command`], however it takes in a synchronous function instead.
         fn add_sync_command<T: MVSynced>(&self, function: impl FnOnce() -> T + Send + 'static) -> BufferedCommand<T>;
+
+        /// Add a command and continue the command chain, returning the result of the command wrapped in
+        /// a buffered command. Do not call this function directly unless you are defining you own commands.
         fn add_command<T: MVSynced, F: Future<Output = T>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<T>;
     }
 );
