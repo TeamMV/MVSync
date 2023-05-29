@@ -14,52 +14,40 @@ pub trait AwaitSync: Future + Sized {
 
 impl<F: Future> AwaitSync for F {}
 
-#[derive(Eq, PartialEq)]
-pub(crate) enum State {
-    Ready,
-    Pending,
-    Done,
-}
-
 pub(crate) struct Signal {
-    pub(crate) state: Mutex<State>,
-    pub(crate) condition: Condvar,
+    ready: Mutex<bool>,
+    condition: Condvar,
 }
 
 impl Signal {
-    pub(crate) fn wait(&self) {
-        let mut state = self.state.lock().unwrap();
-        match *state {
-            State::Done => *state = State::Ready,
-            State::Pending => panic!("Signal already pending!"),
-            State::Ready => {
-                *state = State::Pending;
-                while *state == State::Pending {
-                    state = self.condition.wait(state).unwrap();
-                }
-            }
+    pub(crate) fn new() -> Self {
+        Self {
+            ready: Mutex::new(false),
+            condition: Condvar::new(),
         }
+    }
+
+    pub(crate) fn wait(&self) {
+        let mut ready = self.ready.lock().unwrap();
+        while !*ready {
+            ready = self.condition.wait(ready).unwrap();
+        }
+        *ready = false;
     }
 }
 
 impl Wake for Signal {
     fn wake(self: Arc<Self>) {
-        let mut state = self.state.lock().unwrap();
-        match *state {
-            State::Ready => *state = State::Done,
-            State::Pending => {
-                *state = State::Ready;
-                self.condition.notify_one();
-            }
-            _ => {}
-        }
+        let mut ready = self.ready.lock().unwrap();
+        *ready = true;
+        self.condition.notify_one();
     }
 }
 
 /// Poll a future to completion, blocking the current thread until it is done.
 pub fn await_sync<R>(mut future: impl Future<Output = R>) -> R {
     let mut future = unsafe { std::pin::Pin::new_unchecked(&mut future) };
-    let signal = Arc::new(Signal { state: Mutex::new(State::Ready), condition: Condvar::new() });
+    let signal = Arc::new(Signal::new());
     let waker = Waker::from(signal.clone());
     let mut ctx = Context::from_waker(&waker);
     loop {
@@ -73,7 +61,7 @@ pub fn await_sync<R>(mut future: impl Future<Output = R>) -> R {
 /// Poll a future to completion, blocking the current thread until it is done, returning Err is the thread panics.
 pub fn await_sync_safe<R>(mut future: impl Future<Output = R>) -> Result<R, Box<dyn Any + Send + 'static>> {
     let mut future = unsafe { std::pin::Pin::new_unchecked(&mut future) };
-    let signal = Arc::new(Signal { state: Mutex::new(State::Ready), condition: Condvar::new() });
+    let signal = Arc::new(Signal::new());
     let waker = Waker::from(signal.clone());
     let mut ctx = Context::from_waker(&waker);
     loop {

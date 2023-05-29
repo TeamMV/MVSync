@@ -1,14 +1,16 @@
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::pin::Pin;
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
-use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded as channel};
+use crossbeam_channel::{Receiver, Sender, unbounded as channel};
 use mvutils::id_eq;
 use mvutils::utils::next_id;
-use crate::block::{AwaitSync, Signal, State};
+use crate::block::{AwaitSync, Signal};
 use crate::MVSyncSpecs;
-use crate::task::Task;
+use crate::task::{Task, TaskState};
 
 #[cfg(feature = "command-buffers")]
 use crate::command_buffers::buffer::CommandBuffer;
@@ -22,6 +24,7 @@ use crate::utils::async_sleep_ms;
 pub struct Queue {
     id: u64,
     sender: Sender<Task>,
+    has_tasks: Arc<(Mutex<bool>, Condvar)>
 }
 
 impl Queue {
@@ -33,53 +36,84 @@ impl Queue {
                 threads[i].label(label.clone());
             }
         });
-        let _manager = thread::spawn(move || Self::run(receiver, threads, specs));
+        let has_tasks = Arc::new((Mutex::new(false), Condvar::new()));
+        let pair = has_tasks.clone();
+        let _manager = thread::spawn(move || Self::run(receiver, threads, pair));
         Queue {
             id: next_id("MVSync"),
-            sender
+            sender,
+            has_tasks
         }
     }
 
-    fn run(receiver: Receiver<Task>, threads: Vec<WorkerThread>, specs: MVSyncSpecs) {
-        fn optimal(workers: &[WorkerThread]) -> &WorkerThread {
-            workers.iter().max_by_key(|w| w.free_workers()).unwrap()
-        }
-
-        fn labelled<'a>(workers: &'a [WorkerThread], label: &String) -> Option<&'a WorkerThread> {
-            workers.iter().find(|w| w.get_label().unwrap_or(&"".to_string()) == label)
-        }
-
+    fn run(receiver: Receiver<Task>, threads: Vec<WorkerThread>, has_tasks: Arc<(Mutex<bool>, Condvar)>) {
         let mut tasks = Vec::new();
         loop {
-            let task = receiver.try_recv();
-            match task {
-                Ok(task) => tasks.push(task),
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => break
-            }
-            for i in 0..tasks.len() {
-                if i >= tasks.len() {
-                    break;
+            if tasks.is_empty() {
+                match receiver.recv() {
+                    Ok(task) => tasks.push(task),
+                    Err(_) => break
                 }
-                if tasks[i].can_execute() {
-                    if let Some(t) = tasks[i].get_preferred_thread() {
-                        let thread = labelled(&threads, t);
-                        if let Some(thread) = thread {
-                            if thread.free_workers() == 0 {
-                                continue;
-                            }
-                            thread.get_sender().send(tasks.remove(i)).expect("Failed to send task");
-                            continue;
+            }
+            else {
+                while let Ok(task) = receiver.try_recv() {
+                    tasks.push(task);
+                }
+            }
+
+            let mut remaining_tasks = Vec::with_capacity(tasks.len());
+            for mut task in tasks.drain(..) {
+                if task.can_execute() {
+                    if task.is_panicked() {
+                        let (future, signal) =  task.execute();
+                        future.await_sync();
+                        for signal in signal {
+                            signal.signal();
                         }
+                        continue;
                     }
-                    let thread = optimal(&threads);
-                    if thread.free_workers() == 0 {
-                        break;
+                    else if task.is_cancelled() {
+                        task.state().write().unwrap().replace(TaskState::Cancelled);
+                        let (_, signal) = task.execute();
+                        for signal in signal {
+                            signal.signal();
+                        }
+                        continue;
                     }
-                    thread.get_sender().send(tasks.remove(i)).expect("Failed to send task!");
+
+                    let target_thread = match task.get_preferred_thread() {
+                        Some(label) => threads.iter().find(|thread| thread.get_label().as_deref() == Some(label)),
+                        None => threads.iter().max_by_key(|thread| thread.free_workers()),
+                    };
+
+                    if let Some(thread) = target_thread {
+                        if thread.free_workers() > 0 {
+                            thread.send(task);
+                        } else {
+                            remaining_tasks.push(task);
+                        }
+                    } else {
+                        if task.get_preferred_thread().is_some() {
+                            // Thread with the label doesn't exist
+                            task.remove_preferred_thread();
+                        }
+                        remaining_tasks.push(task);
+                    }
+                }
+                else {
+                    remaining_tasks.push(task);
                 }
             }
-            async_sleep_ms(specs.timeout_ms as u64).await_sync();
+            tasks = remaining_tasks;
+
+            if !tasks.is_empty() {
+                let (lock, cvar) = &*has_tasks;
+                let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while !*has_tasks {
+                    has_tasks = cvar.wait(has_tasks).unwrap_or_else(|e| e.into_inner());
+                }
+                *has_tasks = false;
+            }
         }
     }
 
@@ -90,6 +124,11 @@ impl Queue {
     /// task - The task to push to the back of the queue.
     pub fn submit(&self, task: Task) {
         self.sender.send(task).expect("Failed to submit task!");
+
+        let (lock, cvar) = &*self.has_tasks;
+        let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *has_tasks = true;
+        cvar.notify_one();
     }
 
     /// Submit a task to the queue. This will push the task to the back of the queue. When there is
@@ -100,6 +139,11 @@ impl Queue {
     pub fn submit_on(&self, mut task: Task, thread: &str) {
         task.set_preferred_thread(thread.to_string());
         self.sender.send(task).expect("Failed to submit task!");
+
+        let (lock, cvar) = &*self.has_tasks;
+        let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *has_tasks = true;
+        cvar.notify_one();
     }
 
     /// Submit a command buffer to the queue. This will push the tasks to the back of the queue in
@@ -117,6 +161,11 @@ impl Queue {
         for task in command_buffer.tasks() {
             self.sender.send(task).expect("Failed to submit command buffer!");
         }
+
+        let (lock, cvar) = &*self.has_tasks;
+        let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *has_tasks = true;
+        cvar.notify_one();
     }
 }
 
@@ -124,13 +173,13 @@ struct WorkerThread {
     id: u64,
     sender: Sender<Task>,
     label: Option<String>,
-    free_workers: Arc<RwLock<u32>>
+    free_workers: Arc<AtomicU32>
 }
 
 impl WorkerThread {
     fn new(specs: MVSyncSpecs) -> Self {
         let (sender, receiver) = channel();
-        let free_workers = Arc::new(RwLock::new(specs.workers_per_thread));
+        let free_workers = Arc::new(AtomicU32::new(specs.workers_per_thread));
         let access = free_workers.clone();
         let _thread = thread::spawn(move || Self::run(receiver, access));
         WorkerThread {
@@ -149,42 +198,73 @@ impl WorkerThread {
         self.label.as_ref()
     }
 
-    fn run(receiver: Receiver<Task>, free_workers: Arc<RwLock<u32>>) {
-        let signal = Arc::new(Signal { state: Mutex::new(State::Ready), condition: Condvar::new() });
+    fn run(receiver: Receiver<Task>, free_workers: Arc<AtomicU32>) {
+        let signal = Arc::new(Signal::new());
         let waker = Waker::from(signal.clone());
         let mut ctx = Context::from_waker(&waker);
         let mut futures = Vec::new();
+
         loop {
-            match receiver.try_recv() {
-                Ok(task) => {
-                    *free_workers.write().unwrap() -= 1;
-                    futures.push(task.execute());
+            if futures.is_empty() {
+                match receiver.recv() {
+                    Ok(task) => futures.push((task.state(), task.execute())),
+                    Err(_) => break
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => break,
             }
-            let drained = futures.drain(..).collect::<Vec<_>>();
-            for mut future in drained {
-                let mut p =  unsafe { std::pin::Pin::new_unchecked(&mut future) };
+            else {
+                while let Ok(task) = receiver.try_recv() {
+                    futures.push((task.state(), task.execute()));
+                }
+            }
+
+            futures.retain_mut(|(state, (future, to_signal))| {
+                let mut p =  unsafe { Pin::new_unchecked(future) };
                 match catch_unwind(AssertUnwindSafe(|| p.as_mut().poll(&mut ctx))) {
                     Ok(Poll::Pending) => {
-                        signal.wait();
-                        futures.push(future);
+                        if *state.read().unwrap() == TaskState::Cancelled {
+                            for s in to_signal {
+                                s.signal();
+                            }
+                            false
+                        }
+                        else {
+                            true
+                        }
+                    },
+                    Err(e) => {
+                        state.write().unwrap().replace(TaskState::Panicked(e));
+                        for s in to_signal {
+                            s.signal();
+                        }
+                        false
                     }
-                    _ => {
-                        *free_workers.write().unwrap() += 1;
+                    Ok(Poll::Ready(_)) => {
+                        state.write().unwrap().replace(TaskState::Ready);
+                        free_workers.fetch_add(1, Ordering::SeqCst);
+                        for s in to_signal {
+                            s.signal();
+                        }
+                        false
                     }
                 }
+            });
+
+            if futures.is_empty() {
+                if receiver.is_empty() {
+                    break;
+                }
+                signal.wait();
             }
         }
     }
 
-    fn get_sender(&self) -> Sender<Task> {
-        self.sender.clone()
+    fn send(&self, task: Task) {
+        self.sender.send(task).expect("Failed to send task!");
+        self.free_workers.fetch_sub(1, Ordering::SeqCst);
     }
 
     fn free_workers(&self) -> u32 {
-        *self.free_workers.read().unwrap()
+        self.free_workers.load(Ordering::Relaxed)
     }
 }
 

@@ -96,7 +96,7 @@ pub(crate) enum Signal {
 }
 
 impl Signal {
-    pub(crate) fn signal(self) {
+    pub(crate) fn signal(&self) {
         match self {
             Signal::Semaphore(s) => unsafe {
                 (s.deref() as *const Semaphore).cast_mut().as_mut().unwrap().signal()

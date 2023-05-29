@@ -2,18 +2,20 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
+use std::os::linux::raw::stat;
 use std::sync::{Arc, RwLock};
 use mvutils::{id_eq, sealable};
 use mvutils::utils::next_id;
 use crate::MVSynced;
 use crate::sync::{Fence, Semaphore, SemaphoreUsage};
-use crate::task::{Task, TaskResult};
+use crate::task::{Task, TaskController, TaskHandle, TaskState};
 
 sealable!();
 
 struct TaskChain {
     id: u64,
-    tasks: Vec<Task>
+    tasks: Vec<Task>,
+    controllers: Vec<TaskController>
 }
 
 id_eq!(TaskChain);
@@ -22,12 +24,14 @@ impl TaskChain {
     fn new() -> TaskChain {
         TaskChain {
             id: next_id("MVSync"),
-            tasks: Vec::new()
+            tasks: Vec::new(),
+            controllers: Vec::new()
         }
     }
 
-    fn add_task(&mut self, task: Task) {
+    fn add_task(&mut self, task: Task, controller: TaskController) {
         self.tasks.push(task);
+        self.controllers.push(controller);
     }
 
     fn starting_semaphore(&mut self, semaphore: Arc<Semaphore>) {
@@ -61,6 +65,10 @@ impl TaskChain {
         }
         self.tasks.drain(..).collect()
     }
+
+    fn get_controllers(&mut self) -> Vec<TaskController> {
+        self.controllers.drain(..).collect()
+    }
 }
 
 struct RawCommandBuffer {
@@ -72,44 +80,52 @@ struct RawCommandBuffer {
 }
 
 impl RawCommandBuffer {
-    fn add_sync_task<T: MVSynced>(&mut self, function: impl FnOnce() -> T + Send + 'static) -> TaskResult<T> {
+    fn add_sync_task<T: MVSynced>(&mut self, function: impl FnOnce() -> T + Send + 'static) -> TaskHandle<T> {
         if !self.tasks[self.group].tasks.is_empty() {
             self.group += 1;
             self.tasks.push(TaskChain::new());
         }
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.timeout);
-        let task = Task::from_function(function, buffer);
-        self.tasks[self.group].add_task(task);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
+        let task = Task::from_function(function, buffer, state);
+        self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
 
-    fn add_task<T: MVSynced, F: Future<Output = T> + Send>(&mut self, function: impl FnOnce() -> F + Send + 'static) -> TaskResult<T> {
+    fn add_task<T: MVSynced, F: Future<Output = T> + Send>(&mut self, function: impl FnOnce() -> F + Send + 'static) -> TaskHandle<T> {
         if !self.tasks[self.group].tasks.is_empty() {
             self.group += 1;
             self.tasks.push(TaskChain::new());
         }
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.timeout);
-        let task = Task::from_async(function, buffer);
-        self.tasks[self.group].add_task(task);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
+        let task = Task::from_async(function, buffer, state);
+        self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
 
-    fn add_chained_task<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&mut self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
+    fn add_chained_task<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&mut self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> TaskHandle<R> {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.timeout);
-        let task = Task::from_async_continuation(function, buffer, predecessor);
-        self.tasks[self.group].add_task(task);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
+        let task = Task::from_async_continuation(function, buffer, state, predecessor);
+        self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
 
-    fn add_sync_chained_task<T: MVSynced, R: MVSynced>(&mut self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
+    fn add_sync_chained_task<T: MVSynced, R: MVSynced>(&mut self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> TaskHandle<R> {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.timeout);
-        let task = Task::from_continuation(function, buffer, predecessor);
-        self.tasks[self.group].add_task(task);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
+        let task = Task::from_continuation(function, buffer, state, predecessor);
+        self.tasks[self.group].add_task(task, result.make_controller());
         result
+    }
+
+    fn get_controllers(&mut self) -> Vec<TaskController> {
+        self.tasks[self.group].get_controllers()
     }
 
     fn finish(&self) -> Vec<Task> {
@@ -192,15 +208,21 @@ impl CommandBuffer {
         }
     }
 
-    fn chain_task<T: MVSynced, R: MVSynced, F: Future<Output=R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
+    fn chain_task<T: MVSynced, R: MVSynced, F: Future<Output=R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> TaskHandle<R> {
         unsafe {
             self.ptr.as_mut().unwrap().add_chained_task(function, predecessor)
         }
     }
 
-    fn chain_sync_task<T: MVSynced, R: MVSynced>(&self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
+    fn chain_sync_task<T: MVSynced, R: MVSynced>(&self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> TaskHandle<R> {
         unsafe {
             self.ptr.as_mut().unwrap().add_sync_chained_task(function, predecessor)
+        }
+    }
+
+    fn get_controllers(&self) -> Vec<TaskController> {
+        unsafe {
+            self.ptr.as_mut().unwrap().get_controllers()
         }
     }
 
@@ -374,7 +396,7 @@ impl CommandBufferEntry for CommandBuffer {
 /// let queue: Arc<Queue> = sync.get_queue();
 /// let command_buffer: CommandBuffer = sync.allocate_command_buffer().unwrap();
 ///
-/// let result: TaskResult<ReturnType> = command_buffer
+/// let result: TaskHandle<ReturnType> = command_buffer
 ///     .some_command() //Assume this adds a function that returns `MyType`, wrapped in a `BufferedCommand<MyType>`
 ///     .custom_function() //We can call our custom command.
 ///     .result(); //We get the result of our custom command.
@@ -392,38 +414,30 @@ pub trait Command<T: MVSynced>: Sized + Sealed {
     fn parent(&self) -> &CommandBuffer;
 
     /// Get the task result, ending this command chain.
-    fn response(self) -> TaskResult<T>;
+    fn response(self) -> (TaskHandle<T>, Vec<TaskController>);
 
     /// Add a command and continue the command chain, returning the result of the command wrapped in
     /// a buffered command. Do not call this function directly unless you are defining you own commands.
-    fn add_command<R: MVSynced, F: Future<Output = R> + Send>(self, function: impl FnOnce(T) -> F + Send + 'static) -> BufferedCommand<R> {
-        let parent = self.parent().clone();
-        let response = parent.chain_task(function, self.response());
-        BufferedCommand::new(parent, response)
-    }
+    fn add_command<R: MVSynced, F: Future<Output = R> + Send>(self, function: impl FnOnce(T) -> F + Send + 'static) -> BufferedCommand<R>;
 
     /// Add a command and continue the command chain, returning the result of the command wrapped in
     /// a buffered command. Do not call this function directly unless you are defining you own commands.
     /// This is the same as [`add_command`], however it takes in a synchronous function instead.
-    fn add_sync_command<R: MVSynced>(self, function: impl FnOnce(T) -> R + Send + 'static) -> BufferedCommand<R> {
-        let parent = self.parent().clone();
-        let response = parent.chain_sync_task(function, self.response());
-        BufferedCommand::new(parent, response)
-    }
+    fn add_sync_command<R: MVSynced>(self, function: impl FnOnce(T) -> R + Send + 'static) -> BufferedCommand<R>;
 }
 
 /// A buffered command. This is returned when you add a command to a command buffer, and can be
 /// used to chain more commands together based on their return types, or get the return value as a
-/// [`TaskResult<T>`].
+/// [`TaskHandle<T>`].
 pub struct BufferedCommand<T: MVSynced> {
     parent: CommandBuffer,
-    response: TaskResult<T>,
+    response: TaskHandle<T>,
 }
 
 impl<T: MVSynced> Sealed for BufferedCommand<T> {}
 
 impl<T: MVSynced> BufferedCommand<T> {
-    fn new(parent: CommandBuffer, response: TaskResult<T>) -> Self {
+    fn new(parent: CommandBuffer, response: TaskHandle<T>) -> Self {
         BufferedCommand {
             parent,
             response
@@ -436,7 +450,20 @@ impl<T: MVSynced> Command<T> for BufferedCommand<T> {
         &self.parent
     }
 
-    fn response(self) -> TaskResult<T> {
-        self.response
+    fn response(self) -> (TaskHandle<T>, Vec<TaskController>) {
+        let controllers = self.parent.get_controllers();
+        (self.response, controllers)
+    }
+
+    fn add_command<R: MVSynced, F: Future<Output = R> + Send>(self, function: impl FnOnce(T) -> F + Send + 'static) -> BufferedCommand<R> {
+        let parent = self.parent().clone();
+        let response = parent.chain_task(function, self.response);
+        BufferedCommand::new(parent, response)
+    }
+
+    fn add_sync_command<R: MVSynced>(self, function: impl FnOnce(T) -> R + Send + 'static) -> BufferedCommand<R> {
+        let parent = self.parent().clone();
+        let response = parent.chain_sync_task(function, self.response);
+        BufferedCommand::new(parent, response)
     }
 }

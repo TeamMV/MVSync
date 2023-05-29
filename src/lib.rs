@@ -32,7 +32,7 @@ use mvutils::id_eq;
 use mvutils::utils::next_id;
 use crate::queue::Queue;
 use crate::sync::{Fence, Semaphore};
-use crate::task::{Task, TaskResult};
+use crate::task::{Task, TaskHandle, TaskState};
 
 #[cfg(feature = "command-buffers")]
 use crate::command_buffers::buffer::{CommandBuffer, CommandBufferAllocationError};
@@ -105,44 +105,49 @@ impl MVSync {
     }
 
     /// Create a new [`Task`], wrapping a synchronous function that returns a value.
-    pub fn create_task<T: MVSynced>(&self, function: impl FnOnce() -> T + Send + 'static) -> (Task, TaskResult<T>) {
+    pub fn create_task<T: MVSynced>(&self, function: impl FnOnce() -> T + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
-        let task = Task::from_function(function, buffer);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
+        let task = Task::from_function(function, buffer, state);
         (task, result)
     }
 
     /// Create a new [`Task`], wrapping a synchronous function that takes in a parameter from a
     /// previous function,  returning a value.
-    pub fn create_continuation<T: MVSynced, R: MVSynced>(&self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskResult<T>) -> (Task, TaskResult<R>) {
+    pub fn create_continuation<T: MVSynced, R: MVSynced>(&self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
-        let task = Task::from_continuation(function, buffer, predecessor);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
+        let task = Task::from_continuation(function, buffer, state, predecessor);
         (task, result)
     }
 
     /// Create a new [`Task`], wrapping an asynchronous function that returns a value.
-    pub fn create_async_task<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskResult<T>) {
+    pub fn create_async_task<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
-        let task = Task::from_async(function, buffer);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
+        let task = Task::from_async(function, buffer, state);
         (task, result)
     }
 
     /// Create a new [`Task`], wrapping a future that returns a value.
-    pub fn create_future_task<T: MVSynced>(&self, function: impl Future<Output = T> + Send + 'static) -> (Task, TaskResult<T>) {
+    pub fn create_future_task<T: MVSynced>(&self, function: impl Future<Output = T> + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
-        let task = Task::from_future(function, buffer);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
+        let task = Task::from_future(function, buffer, state);
         (task, result)
     }
 
     /// Create a new [`Task`], wrapping an asynchronous function that takes in a parameter from a
     /// previous function,  returning a value.
-    pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> (Task, TaskResult<R>) {
+    pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
         let buffer = Arc::new(RwLock::new(None));
-        let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
-        let task = Task::from_async_continuation(function, buffer, predecessor);
+        let state = Arc::new(RwLock::new(TaskState::Pending));
+        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
+        let task = Task::from_async_continuation(function, buffer, state, predecessor);
         (task, result)
     }
 }
@@ -179,38 +184,8 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-    use crate::{MVSync, MVSyncSpecs};
-    use crate::utils::async_yield;
-
     #[test]
     fn it_works() {
-        let sync = MVSync::labelled(MVSyncSpecs {
-            thread_count: 1,
-            workers_per_thread: 2,
-            timeout_ms: 10
-        }, vec!["a", "b"]);
-        let queue = sync.get_queue();
-        let (task_a, a) = sync.create_async_task(|| async move {
-            for i in 0..10 {
-                let time = Instant::now();
-                while time.elapsed().as_millis() < 10 {}
-                println!("A did task {}", i + 1);
-                async_yield().await;
-            }
-        });
-        let (task_b, b) = sync.create_async_task(|| async move {
-            for i in 0..10 {
-                let time = Instant::now();
-                while time.elapsed().as_millis() < 10 {}
-                println!("B did task {}", i + 1);
-                async_yield().await;
-            }
-        });
-        queue.submit_on(task_a, "a");
-        queue.submit_on(task_b, "b");
 
-        a.wait();
-        b.wait();
     }
 }

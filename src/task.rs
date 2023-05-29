@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -8,6 +9,38 @@ use mvutils::utils::next_id;
 use crate::MVSynced;
 use crate::sync::{Fence, Semaphore, SemaphoreUsage, Signal};
 
+pub(crate) enum TaskState {
+    Pending,
+    Ready,
+    Panicked(Box<dyn Any + Send + 'static>),
+    Cancelled
+}
+
+impl PartialEq for TaskState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TaskState::Pending, TaskState::Pending) => true,
+            (TaskState::Ready, TaskState::Ready) => true,
+            (TaskState::Panicked(_), TaskState::Panicked(_)) => true,
+            (TaskState::Cancelled, TaskState::Cancelled) => true,
+            _ => false
+        }
+    }
+}
+
+impl TaskState {
+    pub(crate) fn replace(&mut self, state: TaskState) {
+        *self = state;
+    }
+
+    fn take(&mut self) -> TaskState {
+        std::mem::replace(self, TaskState::Pending)
+    }
+}
+
+unsafe impl Send for TaskState {}
+unsafe impl Sync for TaskState {}
+
 /// A wrapper around a function, which can be synchronous or asynchronous, can return a value and take
 /// input parameters.
 ///
@@ -17,64 +50,105 @@ pub struct Task {
     inner: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     wait: Vec<Arc<Semaphore>>,
     signal: Vec<Signal>,
-    preferred_thread: Option<String>
+    preferred_thread: Option<String>,
+    self_state: Arc<RwLock<TaskState>>,
+    state: Arc<RwLock<TaskState>>
 }
 
 impl Task {
-    pub(crate) fn new(inner: impl Future<Output = ()> + Send + 'static) -> Self {
+    pub(crate) fn new(self_state: Arc<RwLock<TaskState>>, inner: impl Future<Output = ()> + Send + 'static, state: Arc<RwLock<TaskState>>) -> Self {
         Task {
             id: next_id("MVSync"),
             inner: Box::pin(inner),
             wait: Vec::new(),
             signal: Vec::new(),
-            preferred_thread: None
+            preferred_thread: None,
+            self_state,
+            state
         }
     }
 
-    pub(crate) fn from_function<T: MVSynced>(function: impl FnOnce() -> T + Send + 'static, buffer: Arc<RwLock<Option<T>>>) -> Self {
-        Task::new(async move {
+    pub(crate) fn from_function<T: MVSynced>(function: impl FnOnce() -> T + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>) -> Self {
+        Task::new(state.clone(), async move {
             let t = function();
             buffer.write().unwrap().replace(t);
+            state.write().unwrap().replace(TaskState::Ready);
             drop(buffer);
-        })
+        }, Arc::new(RwLock::new(TaskState::Ready)))
     }
 
-    pub(crate) fn from_continuation<T: MVSynced, R: MVSynced>(function: impl FnOnce(T) -> R + Send + 'static, buffer: Arc<RwLock<Option<R>>>, predecessor: TaskResult<T>) -> Self {
-        Task::new(async move {
+    pub(crate) fn from_continuation<T: MVSynced, R: MVSynced>(function: impl FnOnce(T) -> R + Send + 'static, buffer: Arc<RwLock<Option<R>>>, state: Arc<RwLock<TaskState>>, predecessor: TaskHandle<T>) -> Self {
+        let prev_state = predecessor.state();
+        Task::new(state.clone(), async move {
+            let prev_state = predecessor.state();
             let t = predecessor.wait();
-            if let Some(t) = t {
-                let r = function(t);
-                buffer.write().unwrap().replace(r);
+            let prev_state = prev_state.write().unwrap().take();
+            match prev_state {
+                TaskState::Ready => {
+                    if let TaskResult::Returned(t) = t {
+                        let r = function(t);
+                        buffer.write().unwrap().replace(r);
+                        state.write().unwrap().replace(TaskState::Ready);
+                    }
+                }
+                TaskState::Panicked(p) => {
+                    state.write().unwrap().replace(TaskState::Panicked(p));
+                }
+                TaskState::Cancelled => {
+                    state.write().unwrap().replace(TaskState::Cancelled);
+                }
+                TaskState::Pending => {
+                    state.write().unwrap().replace(TaskState::Cancelled);
+                }
             }
             drop(buffer);
-        })
+        }, prev_state)
     }
 
-    pub(crate) fn from_async<T: MVSynced, F: Future<Output = T> + Send>(function: impl FnOnce() -> F + Send + 'static, buffer: Arc<RwLock<Option<T>>>) -> Self {
-        Task::new(async move {
+    pub(crate) fn from_async<T: MVSynced, F: Future<Output = T> + Send>(function: impl FnOnce() -> F + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>) -> Self {
+        Task::new(state.clone(), async move {
             let t = function().await;
             buffer.write().unwrap().replace(t);
+            state.write().unwrap().replace(TaskState::Ready);
             drop(buffer);
-        })
+        }, Arc::new(RwLock::new(TaskState::Ready)))
     }
 
-    pub(crate) fn from_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(function: impl FnOnce(T) -> F + Send + 'static, buffer: Arc<RwLock<Option<R>>>, predecessor: TaskResult<T>) -> Self {
-        Task::new(async move {
+    pub(crate) fn from_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(function: impl FnOnce(T) -> F + Send + 'static, buffer: Arc<RwLock<Option<R>>>, state: Arc<RwLock<TaskState>>, predecessor: TaskHandle<T>) -> Self {
+        let prev_state = predecessor.state();
+        Task::new(state.clone(), async move {
+            let prev_state = predecessor.state();
             let t = predecessor.wait();
-            if let Some(t) = t {
-                let r = function(t).await;
-                buffer.write().unwrap().replace(r);
+            let prev_state = prev_state.write().unwrap().take();
+            match prev_state {
+                TaskState::Ready => {
+                    if let TaskResult::Returned(t) = t {
+                        let r = function(t).await;
+                        buffer.write().unwrap().replace(r);
+                        state.write().unwrap().replace(TaskState::Ready);
+                    }
+                }
+                TaskState::Panicked(p) => {
+                    state.write().unwrap().replace(TaskState::Panicked(p));
+                }
+                TaskState::Cancelled => {
+                    state.write().unwrap().replace(TaskState::Cancelled);
+                }
+                TaskState::Pending => {
+                    state.write().unwrap().replace(TaskState::Cancelled);
+                }
             }
             drop(buffer);
-        })
+        }, prev_state)
     }
 
-    pub(crate) fn from_future<T: MVSynced>(function: impl Future<Output = T> + Send + 'static, buffer: Arc<RwLock<Option<T>>>) -> Self {
-        Task::new(async move {
+    pub(crate) fn from_future<T: MVSynced>(function: impl Future<Output = T> + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>) -> Self {
+        Task::new(state.clone(), async move {
             let t = function.await;
             buffer.write().unwrap().replace(t);
+            state.write().unwrap().replace(TaskState::Ready);
             drop(buffer);
-        })
+        }, Arc::new(RwLock::new(TaskState::Ready)))
     }
 
     /// Bind a [`Semaphore`] to this task, the usage will specify whether to wait for the semaphore, or signal it.
@@ -94,54 +168,138 @@ impl Task {
         self.preferred_thread = Some(thread);
     }
 
+    pub fn remove_preferred_thread(&mut self) {
+        self.preferred_thread = None;
+    }
+
     pub fn get_preferred_thread(&self) -> Option<&String> {
         self.preferred_thread.as_ref()
     }
 
-    pub(crate) fn can_execute(&self) -> bool {
-        self.wait.is_empty() || self.wait.iter().all(|s| s.ready())
+    pub(crate) fn state(&self) -> Arc<RwLock<TaskState>> {
+        self.self_state.clone()
     }
 
-    pub(crate) async fn execute(self) {
-        (self.inner).await;
-        for signal in self.signal {
-            signal.signal();
+    pub(crate) fn can_execute(&self) -> bool {
+        (self.wait.is_empty() || self.wait.iter().all(|s| s.ready())) &&
+            *self.state.read().unwrap() != TaskState::Pending
+    }
+
+    pub(crate) fn is_panicked(&self) -> bool {
+        if let TaskState::Panicked(_) = &*self.state.read().unwrap() {
+            true
+        }
+        else {
+            false
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        *self.state.read().unwrap() == TaskState::Cancelled ||
+            *self.self_state.read().unwrap() == TaskState::Cancelled
+    }
+
+    pub(crate) fn execute(self) -> (impl Future<Output = ()> + Send + 'static, Vec<Signal>) {
+        (self.inner, self.signal)
+    }
+}
+
+#[derive(Debug)]
+pub enum TaskResult<T> {
+    Returned(T),
+    Panicked(Box<dyn Any + Send + 'static>),
+    Cancelled
+}
+
+unsafe impl<T> Send for TaskResult<T> {}
+unsafe impl<T> Sync for TaskResult<T> {}
+
+/// A controller which allows you to cancel tasks and check when they are completed without having the result.
+pub struct TaskController {
+    id: u64,
+    state: Arc<RwLock<TaskState>>
+}
+
+impl TaskController {
+    pub(crate) fn new(state: Arc<RwLock<TaskState>>) -> Self {
+        TaskController {
+            id: next_id("MVSync"),
+            state
+        }
+    }
+
+    /// Cancels this task.
+    pub fn cancel(&self) {
+        self.state.write().unwrap().replace(TaskState::Cancelled);
+    }
+
+    /// Returns whether the [`Task`] has finished executing.
+    pub fn is_done(&self) -> bool {
+        *self.state.read().unwrap() != TaskState::Pending
+    }
+}
+
+impl Clone for TaskController {
+    fn clone(&self) -> Self {
+        TaskController {
+            id: next_id("MVSync"),
+            state: self.state.clone()
         }
     }
 }
 
 /// A wrapper for getting the return value of a [`Task`] that has no successors once it has finished.
-pub struct TaskResult<T: MVSynced> {
+pub struct TaskHandle<T: MVSynced> {
     id: u64,
     timeout: u32,
-    inner: Arc<RwLock<Option<T>>>
+    inner: Arc<RwLock<Option<T>>>,
+    state: Arc<RwLock<TaskState>>
 }
 
-impl<T: MVSynced> TaskResult<T> {
-    pub(crate) fn new(inner: Arc<RwLock<Option<T>>>, timeout: u32) -> Self {
-        TaskResult {
+impl<T: MVSynced> TaskHandle<T> {
+    pub(crate) fn new(inner: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>, timeout: u32) -> Self {
+        TaskHandle {
             id: next_id("MVSync"),
             timeout,
-            inner
+            inner,
+            state
         }
+    }
+
+    pub(crate) fn state(&self) -> Arc<RwLock<TaskState>> {
+        self.state.clone()
+    }
+
+    /// Cancels this task.
+    pub fn cancel(&self) {
+        self.state.write().unwrap().replace(TaskState::Cancelled);
     }
 
     /// Returns whether the [`Task`] has finished executing.
     pub fn is_done(&self) -> bool {
-        Arc::strong_count(&self.inner) == 1
+        *self.state.read().unwrap() != TaskState::Pending
     }
 
     /// Waits until the [`Task`] has finished executing, and return the result of the task. If the [`Task`],
     /// or any of its predecessors, have panicked, this function will return [`None`], otherwise, it will
     /// return [`Some(T)`].
-    pub fn wait(self) -> Option<T> {
+    pub fn wait(self) -> TaskResult<T> {
         loop {
-            if Arc::strong_count(&self.inner) == 1 {
-                return self.inner.write().unwrap().take();
+            match self.state.write().unwrap().take() {
+                TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
+                TaskState::Panicked(p) => return TaskResult::Panicked(p),
+                TaskState::Cancelled => return TaskResult::Cancelled,
+                TaskState::Pending => {}
             }
             thread::sleep(Duration::from_millis(self.timeout as u64));
         }
     }
+
+    /// Make a new [`TaskController`] that can cancel or check the state of this [`Task`]. It will not
+    /// be able to retrieve the result value of the task.
+    pub fn make_controller(&self) -> TaskController {
+        TaskController::new(self.state.clone())
+    }
 }
 
-id_eq!(Task, TaskResult<T>[T: MVSynced]);
+id_eq!(Task, TaskHandle<T>[T: MVSynced], TaskController);
