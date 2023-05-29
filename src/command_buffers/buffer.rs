@@ -84,7 +84,7 @@ impl RawCommandBuffer {
         result
     }
 
-    fn add_task<T: MVSynced, F: Future<Output = T>>(&mut self, function: impl FnOnce() -> F + Send + 'static) -> TaskResult<T> {
+    fn add_task<T: MVSynced, F: Future<Output = T> + Send>(&mut self, function: impl FnOnce() -> F + Send + 'static) -> TaskResult<T> {
         if !self.tasks[self.group].tasks.is_empty() {
             self.group += 1;
             self.tasks.push(TaskChain::new());
@@ -96,7 +96,7 @@ impl RawCommandBuffer {
         result
     }
 
-    fn add_chained_task<T: MVSynced, R: MVSynced, F: Future<Output = R>>(&mut self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
+    fn add_chained_task<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&mut self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
         let buffer = Arc::new(RwLock::new(None));
         let result = TaskResult::new(buffer.clone(), self.timeout);
         let task = Task::from_async_continuation(function, buffer, predecessor);
@@ -192,7 +192,7 @@ impl CommandBuffer {
         }
     }
 
-    fn chain_task<T: MVSynced, R: MVSynced, F: Future<Output=R>>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
+    fn chain_task<T: MVSynced, R: MVSynced, F: Future<Output=R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> TaskResult<R> {
         unsafe {
             self.ptr.as_mut().unwrap().add_chained_task(function, predecessor)
         }
@@ -317,7 +317,7 @@ sealed!(
 
         /// Add a command and continue the command chain, returning the result of the command wrapped in
         /// a buffered command. Do not call this function directly unless you are defining you own commands.
-        fn add_command<T: MVSynced, F: Future<Output = T>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<T>;
+        fn add_command<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<T>;
     }
 );
 
@@ -331,7 +331,7 @@ impl CommandBufferEntry for CommandBuffer {
         })
     }
 
-    fn add_command<T: MVSynced, F: Future<Output = T>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<T> {
+    fn add_command<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<T> {
         if self.baked.is_some() {
             panic!("You cannot modify a baked command buffer!");
         }
@@ -396,7 +396,7 @@ pub trait Command<T: MVSynced>: Sized + Sealed {
 
     /// Add a command and continue the command chain, returning the result of the command wrapped in
     /// a buffered command. Do not call this function directly unless you are defining you own commands.
-    fn add_command<R: MVSynced, F: Future<Output = R>>(self, function: impl FnOnce(T) -> F + Send + 'static) -> BufferedCommand<R> {
+    fn add_command<R: MVSynced, F: Future<Output = R> + Send>(self, function: impl FnOnce(T) -> F + Send + 'static) -> BufferedCommand<R> {
         let parent = self.parent().clone();
         let response = parent.chain_task(function, self.response());
         BufferedCommand::new(parent, response)

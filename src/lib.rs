@@ -18,6 +18,8 @@
 //!
 //! - [`block`]\: Very simple 'poll to completion' awaiter. (Adapted from [`pollster`])
 //!
+//! - [`utils`]\: Some simple async utility functions.
+//!
 //! - [`command buffers`]\: A higher-level API abstraction layer, which allows making custom tasks,
 //! as well as chaining tasks.
 //!
@@ -41,6 +43,7 @@ pub mod queue;
 pub mod task;
 pub mod sync;
 pub mod block;
+pub mod utils;
 #[cfg(feature = "command-buffers")]
 pub mod command_buffers;
 
@@ -62,7 +65,17 @@ impl MVSync {
         MVSync {
             id: next_id("MVSync"),
             specs,
-            queue: Arc::new(Queue::new(specs))
+            queue: Arc::new(Queue::new(specs, vec![]))
+        }
+    }
+
+    /// Create a new MVSync instance.
+    pub fn labelled(specs: MVSyncSpecs, labels: Vec<&'static str>) -> MVSync {
+        next_id("MVSync");
+        MVSync {
+            id: next_id("MVSync"),
+            specs,
+            queue: Arc::new(Queue::new(specs, labels.into_iter().map(ToString::to_string).collect()))
         }
     }
 
@@ -109,7 +122,7 @@ impl MVSync {
     }
 
     /// Create a new [`Task`], wrapping an asynchronous function that returns a value.
-    pub fn create_async_task<T: MVSynced, F: Future<Output = T>>(&self, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskResult<T>) {
+    pub fn create_async_task<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskResult<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
         let task = Task::from_async(function, buffer);
@@ -126,7 +139,7 @@ impl MVSync {
 
     /// Create a new [`Task`], wrapping an asynchronous function that takes in a parameter from a
     /// previous function,  returning a value.
-    pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R>>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> (Task, TaskResult<R>) {
+    pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskResult<T>) -> (Task, TaskResult<R>) {
         let buffer = Arc::new(RwLock::new(None));
         let result = TaskResult::new(buffer.clone(), self.specs.timeout_ms);
         let task = Task::from_async_continuation(function, buffer, predecessor);
@@ -166,54 +179,38 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::time::Duration;
-    use futures_timer::Delay;
+    use std::time::Instant;
     use crate::{MVSync, MVSyncSpecs};
-    use crate::command_buffers::buffer::{BufferedCommand, Command, CommandBufferEntry};
-    use crate::command_buffers::commands::{Dbg, Print, Unwrap};
-
-    trait GenString: CommandBufferEntry {
-        fn gen_string<F: Future<Output = Option<String>>>(&self, function: impl FnOnce() -> F + Send + 'static) -> BufferedCommand<Option<String>> {
-            self.add_command(function)
-        }
-    }
-
-    impl<T: CommandBufferEntry> GenString for T {}
+    use crate::utils::async_yield;
 
     #[test]
     fn it_works() {
-        let sync = MVSync::new(MVSyncSpecs {
-            thread_count: 2,
+        let sync = MVSync::labelled(MVSyncSpecs {
+            thread_count: 1,
             workers_per_thread: 2,
-            timeout_ms: 10,
-        });
+            timeout_ms: 10
+        }, vec!["a", "b"]);
         let queue = sync.get_queue();
+        let (task_a, a) = sync.create_async_task(|| async move {
+            for i in 0..10 {
+                let time = Instant::now();
+                while time.elapsed().as_millis() < 10 {}
+                println!("A did task {}", i + 1);
+                async_yield().await;
+            }
+        });
+        let (task_b, b) = sync.create_async_task(|| async move {
+            for i in 0..10 {
+                let time = Instant::now();
+                while time.elapsed().as_millis() < 10 {}
+                println!("B did task {}", i + 1);
+                async_yield().await;
+            }
+        });
+        queue.submit_on(task_a, "a");
+        queue.submit_on(task_b, "b");
 
-        let command_buffer = sync.allocate_command_buffer().unwrap();
-
-        let task = command_buffer
-            .gen_string(|| async move {
-                Delay::new(Duration::from_millis(1000)).await;
-                Some("Hello".to_string())
-            })
-            .unwrap()
-            .print()
-            .response();
-
-        let task2 = command_buffer
-            .gen_string(|| async move {
-                Delay::new(Duration::from_millis(500)).await;
-                Some("World".to_string())
-            })
-            .dbg()
-            .response();
-
-        command_buffer.finish();
-
-        queue.submit_command_buffer(command_buffer);
-
-        task.wait();
-        task2.wait();
+        a.wait();
+        b.wait();
     }
 }
