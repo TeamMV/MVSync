@@ -2,7 +2,6 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
-use std::os::linux::raw::stat;
 use std::sync::{Arc, RwLock};
 use mvutils::{id_eq, sealable};
 use mvutils::utils::next_id;

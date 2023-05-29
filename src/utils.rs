@@ -19,7 +19,7 @@ struct Yield {
 impl Future for Yield {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.set {
           Poll::Ready(())
         } else {

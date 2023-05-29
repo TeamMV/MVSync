@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
@@ -14,7 +14,6 @@ use crate::task::{Task, TaskState};
 
 #[cfg(feature = "command-buffers")]
 use crate::command_buffers::buffer::CommandBuffer;
-use crate::utils::async_sleep_ms;
 
 /// The MVSync queue. A single queue exists per MVSync instance. It is ran on its own thread, and
 /// distributes tasks efficiently between threads that are allocated to MVSync.
@@ -23,8 +22,7 @@ use crate::utils::async_sleep_ms;
 /// to prevent the workers from being clogged by functions that are waiting for other functions.
 pub struct Queue {
     id: u64,
-    sender: Sender<Task>,
-    has_tasks: Arc<(Mutex<bool>, Condvar)>
+    sender: Sender<Task>
 }
 
 impl Queue {
@@ -36,17 +34,14 @@ impl Queue {
                 threads[i].label(label.clone());
             }
         });
-        let has_tasks = Arc::new((Mutex::new(false), Condvar::new()));
-        let pair = has_tasks.clone();
-        let _manager = thread::spawn(move || Self::run(receiver, threads, pair));
+        let _manager = thread::spawn(move || Self::run(receiver, threads, specs));
         Queue {
             id: next_id("MVSync"),
-            sender,
-            has_tasks
+            sender
         }
     }
 
-    fn run(receiver: Receiver<Task>, threads: Vec<WorkerThread>, has_tasks: Arc<(Mutex<bool>, Condvar)>) {
+    fn run(receiver: Receiver<Task>, threads: Vec<WorkerThread>, specs: MVSyncSpecs) {
         let mut tasks = Vec::new();
         loop {
             if tasks.is_empty() {
@@ -107,12 +102,7 @@ impl Queue {
             tasks = remaining_tasks;
 
             if !tasks.is_empty() {
-                let (lock, cvar) = &*has_tasks;
-                let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
-                while !*has_tasks {
-                    has_tasks = cvar.wait(has_tasks).unwrap_or_else(|e| e.into_inner());
-                }
-                *has_tasks = false;
+                thread::sleep(std::time::Duration::from_millis(specs.timeout_ms as u64));
             }
         }
     }
@@ -124,11 +114,6 @@ impl Queue {
     /// task - The task to push to the back of the queue.
     pub fn submit(&self, task: Task) {
         self.sender.send(task).expect("Failed to submit task!");
-
-        let (lock, cvar) = &*self.has_tasks;
-        let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
-        *has_tasks = true;
-        cvar.notify_one();
     }
 
     /// Submit a task to the queue. This will push the task to the back of the queue. When there is
@@ -139,11 +124,6 @@ impl Queue {
     pub fn submit_on(&self, mut task: Task, thread: &str) {
         task.set_preferred_thread(thread.to_string());
         self.sender.send(task).expect("Failed to submit task!");
-
-        let (lock, cvar) = &*self.has_tasks;
-        let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
-        *has_tasks = true;
-        cvar.notify_one();
     }
 
     /// Submit a command buffer to the queue. This will push the tasks to the back of the queue in
@@ -161,11 +141,6 @@ impl Queue {
         for task in command_buffer.tasks() {
             self.sender.send(task).expect("Failed to submit command buffer!");
         }
-
-        let (lock, cvar) = &*self.has_tasks;
-        let mut has_tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
-        *has_tasks = true;
-        cvar.notify_one();
     }
 }
 
