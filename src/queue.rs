@@ -77,7 +77,7 @@ impl Queue {
                     }
 
                     let target_thread = match task.get_preferred_thread() {
-                        Some(label) => threads.iter().find(|thread| thread.get_label().as_deref() == Some(label)),
+                        Some(label) => threads.iter().find(|thread| thread.get_label() == Some(label)),
                         None => threads.iter().max_by_key(|thread| thread.free_workers()),
                     };
 

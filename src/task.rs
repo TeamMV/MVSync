@@ -18,13 +18,7 @@ pub(crate) enum TaskState {
 
 impl PartialEq for TaskState {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (TaskState::Pending, TaskState::Pending) => true,
-            (TaskState::Ready, TaskState::Ready) => true,
-            (TaskState::Panicked(_), TaskState::Panicked(_)) => true,
-            (TaskState::Cancelled, TaskState::Cancelled) => true,
-            _ => false
-        }
+        matches!((self, other), (TaskState::Pending, TaskState::Pending) | (TaskState::Ready, TaskState::Ready) | (TaskState::Panicked(_), TaskState::Panicked(_)) | (TaskState::Cancelled, TaskState::Cancelled))
     }
 }
 
@@ -186,12 +180,7 @@ impl Task {
     }
 
     pub(crate) fn is_panicked(&self) -> bool {
-        if let TaskState::Panicked(_) = &*self.state.read().unwrap() {
-            true
-        }
-        else {
-            false
-        }
+        matches!(&*self.state.read().unwrap(), TaskState::Panicked(_))
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
