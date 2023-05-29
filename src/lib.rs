@@ -44,6 +44,7 @@ pub mod task;
 pub mod sync;
 pub mod block;
 pub mod utils;
+pub mod timer;
 #[cfg(feature = "command-buffers")]
 pub mod command_buffers;
 
@@ -184,8 +185,37 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
+    use crate::{MVSync, MVSyncSpecs};
+    use crate::utils::async_sleep_ms;
+
     #[test]
     fn it_works() {
+        let sync = MVSync::new(MVSyncSpecs {
+            thread_count: 1,
+            workers_per_thread: 2,
+            timeout_ms: 10
+        });
 
+        let queue = sync.get_queue();
+
+        let (task_a, a) = sync.create_async_task(|| async move {
+            for i in 0..10 {
+                println!("A: {}", i);
+                async_sleep_ms(1000).await;
+            }
+        });
+
+        let (task_b, b) = sync.create_async_task(|| async move {
+            for i in 0..10 {
+                println!("B: {}", i);
+                async_sleep_ms(1000).await;
+            }
+        });
+
+        queue.submit(task_a);
+        queue.submit(task_b);
+
+        a.wait();
+        b.wait();
     }
 }

@@ -2,14 +2,14 @@ use std::future::{Future};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration};
-use futures_timer::Delay;
+use crate::timer::Sleep;
 
 pub fn async_sleep(duration: Duration) -> impl Future<Output = ()> {
-    Delay::new(duration)
+    Sleep::new(duration)
 }
 
 pub fn async_sleep_ms(ms: u64) -> impl Future<Output = ()> {
-    Delay::new(Duration::from_millis(ms))
+    Sleep::new(Duration::from_millis(ms))
 }
 
 struct Yield {
