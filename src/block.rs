@@ -1,8 +1,11 @@
 use std::any::Any;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
+use mvutils::unsafe_utils::{Nullable, UnsafeRef};
+use mvutils::utils::Recover;
 
 pub trait AwaitSync: Future + Sized {
     /// Poll a future to completion, blocking the current thread until it is done.
@@ -17,6 +20,7 @@ impl<F: Future> AwaitSync for F {}
 pub(crate) struct Signal {
     ready: Mutex<bool>,
     condition: Condvar,
+    waker: Mutex<Nullable<Waker>>,
 }
 
 impl Signal {
@@ -24,13 +28,18 @@ impl Signal {
         Self {
             ready: Mutex::new(false),
             condition: Condvar::new(),
+            waker: Mutex::new(Nullable::null())
         }
     }
 
+    pub(crate) fn ready(&self) -> bool {
+        *self.ready.lock().recover()
+    }
+
     pub(crate) fn wait(&self) {
-        let mut ready = self.ready.lock().unwrap();
+        let mut ready = self.ready.lock().recover();
         while !*ready {
-            ready = self.condition.wait(ready).unwrap();
+            ready = self.condition.wait(ready).recover();
         }
         *ready = false;
     }
@@ -38,8 +47,13 @@ impl Signal {
 
 impl Wake for Signal {
     fn wake(self: Arc<Self>) {
-        let mut ready = self.ready.lock().unwrap();
+        let mut ready = self.ready.lock().recover();
         *ready = true;
+        let waker = self.waker.lock().recover();
+        if !waker.is_null() {
+            waker.clone().wake();
+        }
+        drop(waker);
         self.condition.notify_one();
     }
 }
@@ -47,6 +61,32 @@ impl Wake for Signal {
 impl Drop for Signal {
     fn drop(&mut self) {
         self.condition.notify_one();
+    }
+}
+
+pub struct AsyncSignal {
+    signal: Arc<Signal>
+}
+
+impl AsyncSignal {
+    pub(crate) fn new() -> Self {
+        Self {
+            signal: Arc::new(Signal::new())
+        }
+    }
+}
+
+impl Future for AsyncSignal {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.signal.ready() {
+            Poll::Ready(())
+        }
+        else {
+            *self.signal.waker.lock().recover() = UnsafeRef::new(cx.waker());
+            Poll::Pending
+        }
     }
 }
 

@@ -6,8 +6,9 @@ use std::thread;
 use std::time::Duration;
 use mvutils::id_eq;
 use mvutils::utils::next_id;
+use crate::block::Signal;
 use crate::MVSynced;
-use crate::sync::{Fence, Semaphore, SemaphoreUsage, Signal};
+use crate::sync::{Fence, Semaphore, SemaphoreUsage};
 
 pub(crate) enum TaskState {
     Pending,
@@ -48,35 +49,37 @@ pub struct Task {
     id: u64,
     inner: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     wait: Vec<Arc<Semaphore>>,
-    signal: Vec<Signal>,
+    signal: [Arc<Signal>; 2],
+    semaphores: Vec<Arc<Semaphore>>,
     preferred_thread: Option<String>,
     self_state: Arc<RwLock<TaskState>>,
     state: Arc<RwLock<TaskState>>
 }
 
 impl Task {
-    pub(crate) fn new(self_state: Arc<RwLock<TaskState>>, inner: impl Future<Output = ()> + Send + 'static, state: Arc<RwLock<TaskState>>) -> Self {
+    pub(crate) fn new(self_state: Arc<RwLock<TaskState>>, inner: impl Future<Output = ()> + Send + 'static, state: Arc<RwLock<TaskState>>, signal: [Arc<Signal>; 2]) -> Self {
         Task {
             id: next_id("MVSync"),
             inner: Box::pin(inner),
             wait: Vec::new(),
-            signal: Vec::new(),
+            signal,
+            semaphores: Vec::new(),
             preferred_thread: None,
             self_state,
             state
         }
     }
 
-    pub(crate) fn from_function<T: MVSynced>(function: impl FnOnce() -> T + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>) -> Self {
+    pub(crate) fn from_function<T: MVSynced>(function: impl FnOnce() -> T + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>, signal: [Arc<Signal>; 2]) -> Self {
         Task::new(state.clone(), async move {
             let t = function();
             buffer.write().unwrap().replace(t);
             state.write().unwrap().replace(TaskState::Ready);
             drop(buffer);
-        }, Arc::new(RwLock::new(TaskState::Ready)))
+        }, Arc::new(RwLock::new(TaskState::Ready)), signal)
     }
 
-    pub(crate) fn from_continuation<T: MVSynced, R: MVSynced>(function: impl FnOnce(T) -> R + Send + 'static, buffer: Arc<RwLock<Option<R>>>, state: Arc<RwLock<TaskState>>, predecessor: TaskHandle<T>) -> Self {
+    pub(crate) fn from_continuation<T: MVSynced, R: MVSynced>(function: impl FnOnce(T) -> R + Send + 'static, buffer: Arc<RwLock<Option<R>>>, state: Arc<RwLock<TaskState>>, signal: [Arc<Signal>; 2], predecessor: TaskHandle<T>) -> Self {
         let prev_state = predecessor.state();
         Task::new(state.clone(), async move {
             let prev_state = predecessor.state();
@@ -101,19 +104,19 @@ impl Task {
                 }
             }
             drop(buffer);
-        }, prev_state)
+        }, prev_state, signal)
     }
 
-    pub(crate) fn from_async<T: MVSynced, F: Future<Output = T> + Send>(function: impl FnOnce() -> F + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>) -> Self {
+    pub(crate) fn from_async<T: MVSynced, F: Future<Output = T> + Send>(function: impl FnOnce() -> F + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>, signal: [Arc<Signal>; 2]) -> Self {
         Task::new(state.clone(), async move {
             let t = function().await;
             buffer.write().unwrap().replace(t);
             state.write().unwrap().replace(TaskState::Ready);
             drop(buffer);
-        }, Arc::new(RwLock::new(TaskState::Ready)))
+        }, Arc::new(RwLock::new(TaskState::Ready)), signal)
     }
 
-    pub(crate) fn from_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(function: impl FnOnce(T) -> F + Send + 'static, buffer: Arc<RwLock<Option<R>>>, state: Arc<RwLock<TaskState>>, predecessor: TaskHandle<T>) -> Self {
+    pub(crate) fn from_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(function: impl FnOnce(T) -> F + Send + 'static, buffer: Arc<RwLock<Option<R>>>, state: Arc<RwLock<TaskState>>, signal: [Arc<Signal>; 2], predecessor: TaskHandle<T>) -> Self {
         let prev_state = predecessor.state();
         Task::new(state.clone(), async move {
             let prev_state = predecessor.state();
@@ -138,29 +141,29 @@ impl Task {
                 }
             }
             drop(buffer);
-        }, prev_state)
+        }, prev_state, signal)
     }
 
-    pub(crate) fn from_future<T: MVSynced>(function: impl Future<Output = T> + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>) -> Self {
+    pub(crate) fn from_future<T: MVSynced>(function: impl Future<Output = T> + Send + 'static, buffer: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>, signal: [Arc<Signal>; 2]) -> Self {
         Task::new(state.clone(), async move {
             let t = function.await;
             buffer.write().unwrap().replace(t);
             state.write().unwrap().replace(TaskState::Ready);
             drop(buffer);
-        }, Arc::new(RwLock::new(TaskState::Ready)))
+        }, Arc::new(RwLock::new(TaskState::Ready)), signal)
     }
 
     /// Bind a [`Semaphore`] to this task, the usage will specify whether to wait for the semaphore, or signal it.
     pub fn bind_semaphore(&mut self, semaphore: Arc<Semaphore>, usage: SemaphoreUsage) {
         match usage {
             SemaphoreUsage::Wait => self.wait.push(semaphore),
-            SemaphoreUsage::Signal => self.signal.push(Signal::Semaphore(semaphore))
+            SemaphoreUsage::Signal => self.semaphores.push(semaphore)
         }
     }
 
     /// Bind a [`Fence`] to this task, which will open when this task finishes.
     pub fn bind_fence(&mut self, fence: Arc<Fence>) {
-        self.signal.push(Signal::Fence(fence));
+        fence.bind(self.signal[0].clone())
     }
 
     pub fn set_preferred_thread(&mut self, thread: String) {
@@ -201,8 +204,8 @@ impl Task {
             *self.self_state.read().unwrap() == TaskState::Cancelled
     }
 
-    pub(crate) fn execute(self) -> (impl Future<Output = ()> + Send + 'static, Vec<Signal>) {
-        (self.inner, self.signal)
+    pub(crate) fn execute(self) -> (impl Future<Output = ()> + Send + 'static, Vec<Arc<Semaphore>>, [Arc<Signal>; 2]) {
+        (self.inner, self.semaphores, self.signal)
     }
 }
 
@@ -219,14 +222,16 @@ unsafe impl<T> Sync for TaskResult<T> {}
 /// A controller which allows you to cancel tasks and check when they are completed without having the result.
 pub struct TaskController {
     id: u64,
-    state: Arc<RwLock<TaskState>>
+    state: Arc<RwLock<TaskState>>,
+    signal: Arc<Signal>
 }
 
 impl TaskController {
-    pub(crate) fn new(state: Arc<RwLock<TaskState>>) -> Self {
+    pub(crate) fn new(state: Arc<RwLock<TaskState>>, signal: Arc<Signal>) -> Self {
         TaskController {
             id: next_id("MVSync"),
-            state
+            state,
+            signal
         }
     }
 
@@ -237,7 +242,12 @@ impl TaskController {
 
     /// Returns whether the [`Task`] has finished executing.
     pub fn is_done(&self) -> bool {
-        *self.state.read().unwrap() != TaskState::Pending
+        self.signal.ready()
+    }
+
+    /// Waits for this task to finish executing.
+    pub fn wait(&self) {
+        self.signal.wait();
     }
 }
 
@@ -245,7 +255,8 @@ impl Clone for TaskController {
     fn clone(&self) -> Self {
         TaskController {
             id: next_id("MVSync"),
-            state: self.state.clone()
+            state: self.state.clone(),
+            signal: self.signal.clone()
         }
     }
 }
@@ -253,18 +264,18 @@ impl Clone for TaskController {
 /// A wrapper for getting the return value of a [`Task`] that has no successors once it has finished.
 pub struct TaskHandle<T: MVSynced> {
     id: u64,
-    timeout: u32,
     inner: Arc<RwLock<Option<T>>>,
-    state: Arc<RwLock<TaskState>>
+    state: Arc<RwLock<TaskState>>,
+    signal: Arc<Signal>
 }
 
 impl<T: MVSynced> TaskHandle<T> {
-    pub(crate) fn new(inner: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>, timeout: u32) -> Self {
+    pub(crate) fn new(inner: Arc<RwLock<Option<T>>>, state: Arc<RwLock<TaskState>>, signal: Arc<Signal>) -> Self {
         TaskHandle {
             id: next_id("MVSync"),
-            timeout,
             inner,
-            state
+            state,
+            signal
         }
     }
 
@@ -286,21 +297,19 @@ impl<T: MVSynced> TaskHandle<T> {
     /// or any of its predecessors, have panicked, this function will return [`None`], otherwise, it will
     /// return [`Some(T)`].
     pub fn wait(self) -> TaskResult<T> {
-        loop {
-            match self.state.write().unwrap().take() {
-                TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
-                TaskState::Panicked(p) => return TaskResult::Panicked(p),
-                TaskState::Cancelled => return TaskResult::Cancelled,
-                TaskState::Pending => {}
-            }
-            thread::sleep(Duration::from_millis(self.timeout as u64));
+        self.signal.wait();
+        match self.state.write().unwrap().take() {
+            TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
+            TaskState::Panicked(p) => return TaskResult::Panicked(p),
+            TaskState::Cancelled => return TaskResult::Cancelled,
+            TaskState::Pending => panic!("Function finished but is still pending!")
         }
     }
 
     /// Make a new [`TaskController`] that can cancel or check the state of this [`Task`]. It will not
     /// be able to retrieve the result value of the task.
     pub fn make_controller(&self) -> TaskController {
-        TaskController::new(self.state.clone())
+        TaskController::new(self.state.clone(), self.signal.clone())
     }
 }
 

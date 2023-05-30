@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 use mvutils::{id_eq, sealable};
 use mvutils::utils::next_id;
+use crate::block::Signal;
 use crate::MVSynced;
 use crate::sync::{Fence, Semaphore, SemaphoreUsage};
 use crate::task::{Task, TaskController, TaskHandle, TaskState};
@@ -75,7 +76,7 @@ struct RawCommandBuffer {
     chain_links: Vec<(usize, usize)>,
     fences: Vec<(usize, Arc<Fence>)>,
     group: usize,
-    timeout: u32
+    signal: Arc<Signal>
 }
 
 impl RawCommandBuffer {
@@ -86,8 +87,9 @@ impl RawCommandBuffer {
         }
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
-        let task = Task::from_function(function, buffer, state);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_function(function, buffer, state, [signal, self.signal.clone()]);
         self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
@@ -99,8 +101,9 @@ impl RawCommandBuffer {
         }
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
-        let task = Task::from_async(function, buffer, state);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_async(function, buffer, state, [signal, self.signal.clone()]);
         self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
@@ -108,8 +111,9 @@ impl RawCommandBuffer {
     fn add_chained_task<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&mut self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> TaskHandle<R> {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
-        let task = Task::from_async_continuation(function, buffer, state, predecessor);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_async_continuation(function, buffer, state, [signal, self.signal.clone()], predecessor);
         self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
@@ -117,8 +121,9 @@ impl RawCommandBuffer {
     fn add_sync_chained_task<T: MVSynced, R: MVSynced>(&mut self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> TaskHandle<R> {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.timeout);
-        let task = Task::from_continuation(function, buffer, state, predecessor);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_continuation(function, buffer, state, [signal, self.signal.clone()], predecessor);
         self.tasks[self.group].add_task(task, result.make_controller());
         result
     }
@@ -179,7 +184,7 @@ impl Display for CommandBufferAllocationError {
 impl Error for CommandBufferAllocationError {}
 
 impl CommandBuffer {
-    pub(crate) fn new(timeout: u32) -> Result<CommandBuffer, CommandBufferAllocationError> {
+    pub(crate) fn new(signal: Arc<Signal>) -> Result<CommandBuffer, CommandBufferAllocationError> {
         unsafe {
             let ptr = alloc_zeroed(Layout::new::<RawCommandBuffer>()) as *mut RawCommandBuffer;
             let refs = alloc_zeroed(Layout::new::<usize>()) as *mut usize;
@@ -192,7 +197,7 @@ impl CommandBuffer {
                 chain_links: Vec::new(),
                 fences: Vec::new(),
                 group: 0,
-                timeout
+                signal
             });
             refs.write(1);
 
@@ -291,7 +296,7 @@ impl CommandBuffer {
         }
         unsafe {
             let raw = self.ptr.as_mut().unwrap();
-            let fence = Arc::new(Fence::new(raw.timeout));
+            let fence = Arc::new(Fence::new());
             raw.fences.push((task_chain, fence.clone()));
             fence
         }

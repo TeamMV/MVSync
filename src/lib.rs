@@ -30,6 +30,7 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 use mvutils::id_eq;
 use mvutils::utils::next_id;
+use crate::block::Signal;
 use crate::queue::Queue;
 use crate::sync::{Fence, Semaphore};
 use crate::task::{Task, TaskHandle, TaskState};
@@ -56,27 +57,32 @@ impl<T> MVSynced for T where T: Send + Sync + 'static {}
 pub struct MVSync {
     id: u64,
     specs: MVSyncSpecs,
-    queue: Arc<Queue>
+    queue: Arc<Queue>,
+    signal: Arc<Signal>
 }
 
 impl MVSync {
     /// Create a new MVSync instance.
     pub fn new(specs: MVSyncSpecs) -> MVSync {
         next_id("MVSync");
+        let signal = Arc::new(Signal::new());
         MVSync {
             id: next_id("MVSync"),
             specs,
-            queue: Arc::new(Queue::new(specs, vec![]))
+            queue: Arc::new(Queue::new(specs, vec![], signal.clone())),
+            signal
         }
     }
 
     /// Create a new MVSync instance.
     pub fn labelled(specs: MVSyncSpecs, labels: Vec<&'static str>) -> MVSync {
         next_id("MVSync");
+        let signal = Arc::new(Signal::new());
         MVSync {
             id: next_id("MVSync"),
             specs,
-            queue: Arc::new(Queue::new(specs, labels.into_iter().map(ToString::to_string).collect()))
+            queue: Arc::new(Queue::new(specs, labels.into_iter().map(ToString::to_string).collect(), signal.clone())),
+            signal
         }
     }
 
@@ -92,7 +98,7 @@ impl MVSync {
 
     /// Create a [`Fence`]
     pub fn create_fence(&self) -> Arc<Fence> {
-        Arc::new(Fence::new(self.specs.timeout_ms))
+        Arc::new(Fence::new())
     }
 
     #[cfg(feature = "command-buffers")]
@@ -102,15 +108,16 @@ impl MVSync {
     /// - [`Ok(CommandBuffer)`] if the command buffer was successfully allocated.
     /// - [`Err(CommandBufferAllocationError)`] if the command buffer could not be allocated on the heap.
     pub fn allocate_command_buffer(&self) -> Result<CommandBuffer, CommandBufferAllocationError> {
-        CommandBuffer::new(self.specs.timeout_ms)
+        CommandBuffer::new(self.signal.clone())
     }
 
     /// Create a new [`Task`], wrapping a synchronous function that returns a value.
     pub fn create_task<T: MVSynced>(&self, function: impl FnOnce() -> T + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
-        let task = Task::from_function(function, buffer, state);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_function(function, buffer, state, [signal, self.signal.clone()]);
         (task, result)
     }
 
@@ -119,8 +126,9 @@ impl MVSync {
     pub fn create_continuation<T: MVSynced, R: MVSynced>(&self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
-        let task = Task::from_continuation(function, buffer, state, predecessor);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_continuation(function, buffer, state, [signal, self.signal.clone()], predecessor);
         (task, result)
     }
 
@@ -128,8 +136,9 @@ impl MVSync {
     pub fn create_async_task<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
-        let task = Task::from_async(function, buffer, state);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_async(function, buffer, state, [signal, self.signal.clone()]);
         (task, result)
     }
 
@@ -137,8 +146,9 @@ impl MVSync {
     pub fn create_future_task<T: MVSynced>(&self, function: impl Future<Output = T> + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
-        let task = Task::from_future(function, buffer, state);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_future(function, buffer, state, [signal, self.signal.clone()]);
         (task, result)
     }
 
@@ -147,8 +157,9 @@ impl MVSync {
     pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
-        let result = TaskHandle::new(buffer.clone(), state.clone(), self.specs.timeout_ms);
-        let task = Task::from_async_continuation(function, buffer, state, predecessor);
+        let signal = Arc::new(Signal::new());
+        let result = TaskHandle::new(buffer.clone(), state.clone(), signal.clone());
+        let task = Task::from_async_continuation(function, buffer, state, [signal, self.signal.clone()], predecessor);
         (task, result)
     }
 }
@@ -166,18 +177,13 @@ pub struct MVSyncSpecs {
     /// How many asynchronous workers to create per thread. This does not increase the speed, and is
     /// only useful if you plan to use this to wait for events, like networking requests.
     pub workers_per_thread: u32,
-
-    /// How long to wait between loop iterations. A lower value means there will be less latency
-    /// between task executions, at the cost of increased CPU usage.
-    pub timeout_ms: u32,
 }
 
 impl Default for MVSyncSpecs {
     fn default() -> Self {
         MVSyncSpecs {
             thread_count: 1,
-            workers_per_thread: 1,
-            timeout_ms: 10
+            workers_per_thread: 1
         }
     }
 }
@@ -185,9 +191,39 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
+    use crate::{MVSync, MVSyncSpecs};
+    use crate::prelude::{Command, CommandBufferEntry};
+    use crate::utils::async_sleep_ms;
 
     #[test]
     fn it_works() {
+        let sync = MVSync::new(MVSyncSpecs {
+            thread_count: 1,
+            workers_per_thread: 2
+        });
 
+        let queue = sync.get_queue();
+
+        let buffer = sync.allocate_command_buffer().unwrap();
+
+        let (a, _) = buffer.add_command(|| async move {
+            async_sleep_ms(1000).await;
+            "Hi"
+        }).add_command(|s| async move {
+            async_sleep_ms(1000).await;
+            println!("{}", s);
+        }).response();
+
+        let (b, _) = buffer.add_command(|| async move {
+            async_sleep_ms(1000).await;
+            println!("Bye");
+        }).response();
+
+        buffer.finish();
+
+        queue.submit_command_buffer(buffer);
+
+        a.wait();
+        b.wait();
     }
 }

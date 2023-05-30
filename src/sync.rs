@@ -1,9 +1,11 @@
 use std::ops::Deref;
 use std::sync::Arc;
+use std::task::Wake;
 use std::thread;
 use std::time::Duration;
 use mvutils::id_eq;
 use mvutils::utils::next_id;
+use crate::block::Signal;
 
 /// A sync object used to add control flow to tasks. It is an internal sync object, meaning it can
 /// only be read from within a task. If a task depends on another one to finish, you should use a
@@ -25,8 +27,10 @@ impl Semaphore {
         }
     }
 
-    pub(crate) fn signal(&mut self) {
-        self.signaled = true;
+    pub(crate) fn signal(&self) {
+        unsafe {
+            (self as *const Semaphore).cast_mut().as_mut().unwrap().signaled = true;
+        }
     }
 
     pub(crate) fn ready(&self) -> bool {
@@ -44,21 +48,21 @@ impl Semaphore {
 /// Counter fences are planned to be added in the future.
 pub struct Fence {
     id: u64,
-    timeout: u32,
-    open: bool
+    signalled: Option<Arc<Signal>>
 }
 
 impl Fence {
-    pub(crate) fn new(timeout: u32) -> Self {
+    pub(crate) fn new() -> Self {
         Fence {
             id: next_id("MVSync"),
-            timeout,
-            open: false,
+            signalled: None
         }
     }
 
-    pub(crate) fn open(&mut self) {
-        self.open = true;
+    pub(crate) fn bind(&self, signal: Arc<Signal>) {
+        unsafe {
+            (self as *const Fence).cast_mut().as_mut().unwrap().signalled.replace(signal);
+        }
     }
 
     /// Check if the fence is open.
@@ -69,7 +73,7 @@ impl Fence {
     /// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
     /// Counter fences are planned to be added in the future.
     pub fn ready(&self) -> bool {
-        self.open
+        self.signalled.as_ref().expect("Checking unbound fence!").ready()
     }
 
     /// Block the current thread until the fence is signaled, indicating that the task
@@ -79,34 +83,11 @@ impl Fence {
     /// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
     /// Counter fences are planned to be added in the future.
     pub fn wait(&self) {
-        loop {
-            if self.open {
-                break;
-            }
-            thread::sleep(Duration::from_millis(self.timeout as u64));
-        }
+        self.signalled.clone().expect("Checking unbound fence!").wait()
     }
 }
 
 id_eq!(Semaphore, Fence);
-
-pub(crate) enum Signal {
-    Semaphore(Arc<Semaphore>),
-    Fence(Arc<Fence>)
-}
-
-impl Signal {
-    pub(crate) fn signal(&self) {
-        match self {
-            Signal::Semaphore(s) => unsafe {
-                (s.deref() as *const Semaphore).cast_mut().as_mut().unwrap().signal()
-            }
-            Signal::Fence(s) => unsafe {
-                (s.deref() as *const Fence).cast_mut().as_mut().unwrap().open()
-            }
-        }
-    }
-}
 
 pub enum SemaphoreUsage {
     /// Wait for the semaphore to be signaled.

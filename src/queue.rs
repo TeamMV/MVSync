@@ -22,11 +22,12 @@ use crate::command_buffers::buffer::CommandBuffer;
 /// to prevent the workers from being clogged by functions that are waiting for other functions.
 pub struct Queue {
     id: u64,
-    sender: Sender<Task>
+    sender: Sender<Task>,
+    signal: Arc<Signal>
 }
 
 impl Queue {
-    pub(crate) fn new(specs: MVSyncSpecs, labels: Vec<String>) -> Self {
+    pub(crate) fn new(specs: MVSyncSpecs, labels: Vec<String>, signal: Arc<Signal>) -> Self {
         let (sender, receiver) = channel();
         let mut threads = (0..specs.thread_count).map(|_| WorkerThread::new(specs)).collect::<Vec<_>>();
         labels.iter().enumerate().for_each(|(i, label)| {
@@ -34,14 +35,16 @@ impl Queue {
                 threads[i].label(label.clone());
             }
         });
-        let _manager = thread::spawn(move || Self::run(receiver, threads, specs));
+        let clone = signal.clone();
+        let _manager = thread::spawn(move || Self::run(receiver, threads, clone));
         Queue {
             id: next_id("MVSync"),
-            sender
+            sender,
+            signal
         }
     }
 
-    fn run(receiver: Receiver<Task>, threads: Vec<WorkerThread>, specs: MVSyncSpecs) {
+    fn run(receiver: Receiver<Task>, threads: Vec<WorkerThread>, signal: Arc<Signal>) {
         let mut tasks = Vec::new();
         loop {
             if tasks.is_empty() {
@@ -62,17 +65,23 @@ impl Queue {
                     if task.is_panicked() {
                         let p = task.get_panic();
                         task.state().write().unwrap().replace(TaskState::Panicked(p));
-                        let (_, signal) =  task.execute();
+                        let (_, semaphores, signal) =  task.execute();
+                        for semaphore in semaphores {
+                            semaphore.signal();
+                        }
                         for signal in signal {
-                            signal.signal();
+                            signal.wake();
                         }
                         continue;
                     }
                     else if task.is_cancelled() {
                         task.state().write().unwrap().replace(TaskState::Cancelled);
-                        let (_, signal) = task.execute();
+                        let (_, semaphores, signal) = task.execute();
+                        for semaphore in semaphores {
+                            semaphore.signal();
+                        }
                         for signal in signal {
-                            signal.signal();
+                            signal.wake();
                         }
                         continue;
                     }
@@ -103,7 +112,7 @@ impl Queue {
             tasks = remaining_tasks;
 
             if !tasks.is_empty() {
-                thread::sleep(std::time::Duration::from_millis(specs.timeout_ms as u64));
+                signal.wait();
             }
         }
     }
@@ -115,16 +124,43 @@ impl Queue {
     /// task - The task to push to the back of the queue.
     pub fn submit(&self, task: Task) {
         self.sender.send(task).expect("Failed to submit task!");
+        self.signal.clone().wake();
+    }
+
+    /// Submit a vec of tasks to the queue. This will push the task to the back of the queue. When there is
+    /// a free worker available, the task will be popped off the queue and executed by the worker in order.
+    ///
+    /// # Arguments
+    /// tasks - The vec of tasks to push to the back of the queue.
+    pub fn submit_all(&self, tasks: Vec<Task>) {
+        for task in tasks {
+            self.sender.send(task).expect("Failed to submit task!");
+        }
+        self.signal.clone().wake();
     }
 
     /// Submit a task to the queue. This will push the task to the back of the queue. When there is
-    /// a free worker available, the task will be popped off the queue and executed by the worker.
+    /// a free worker available on the given thread, the task will be popped off the queue and executed by the worker.
     ///
     /// # Arguments
     /// task - The task to push to the back of the queue.
     pub fn submit_on(&self, mut task: Task, thread: &str) {
         task.set_preferred_thread(thread.to_string());
         self.sender.send(task).expect("Failed to submit task!");
+        self.signal.clone().wake();
+    }
+
+    /// Submit a vec of tasks to the queue. This will push the task to the back of the queue. When there is
+    /// a free worker available on the given thread, the task will be popped off the queue and executed by the worker in order.
+    ///
+    /// # Arguments
+    /// tasks - The vec of tasks to push to the back of the queue.
+    pub fn submit_all_on(&self, tasks: Vec<Task>, thread: &str) {
+        for mut task in tasks {
+            task.set_preferred_thread(thread.to_string());
+            self.sender.send(task).expect("Failed to submit task!");
+        }
+        self.signal.clone().wake();
     }
 
     /// Submit a command buffer to the queue. This will push the tasks to the back of the queue in
@@ -142,6 +178,27 @@ impl Queue {
         for task in command_buffer.tasks() {
             self.sender.send(task).expect("Failed to submit command buffer!");
         }
+        self.signal.clone().wake();
+    }
+
+    /// Submit a vec of command buffers to the queue. This will push the tasks to the back of the queue in
+    /// the same order you called them on the buffer. When there is a free worker available, each
+    /// task will be popped off the queue and executed by the worker sequentially. Tasks that require
+    /// other tasks to finish will not be popped until they are ready, so no tasks will clog the queue.
+    ///
+    /// # Panics
+    /// If any of the command buffer is not baked.
+    ///
+    /// # Arguments
+    /// command_buffers - The vec of command buffers to push to the back of the queue.
+    #[cfg(feature = "command-buffers")]
+    pub fn submit_command_buffers(&self, command_buffers: Vec<CommandBuffer>) {
+        for command_buffer in command_buffers {
+            for task in command_buffer.tasks() {
+                self.sender.send(task).expect("Failed to submit command buffers!");
+            }
+        }
+        self.signal.clone().wake();
     }
 }
 
@@ -196,13 +253,16 @@ impl WorkerThread {
                 }
             }
 
-            futures.retain_mut(|(state, (future, to_signal))| {
+            futures.retain_mut(|(state, (future, semaphores, to_signal))| {
                 let mut p =  unsafe { Pin::new_unchecked(future) };
                 match catch_unwind(AssertUnwindSafe(|| p.as_mut().poll(&mut ctx))) {
                     Ok(Poll::Pending) => {
                         if *state.read().unwrap() == TaskState::Cancelled {
-                            for s in to_signal {
+                            for s in semaphores {
                                 s.signal();
+                            }
+                            for signal in to_signal {
+                                signal.clone().wake();
                             }
                             false
                         }
@@ -212,15 +272,21 @@ impl WorkerThread {
                     },
                     Err(e) => {
                         state.write().unwrap().replace(TaskState::Panicked(e));
-                        for s in to_signal {
+                        for s in semaphores {
                             s.signal();
+                        }
+                        for signal in to_signal {
+                            signal.clone().wake();
                         }
                         false
                     }
                     Ok(Poll::Ready(_)) => {
                         free_workers.fetch_add(1, Ordering::SeqCst);
-                        for s in to_signal {
+                        for s in semaphores {
                             s.signal();
+                        }
+                        for signal in to_signal {
+                            signal.clone().wake();
                         }
                         false
                     }
