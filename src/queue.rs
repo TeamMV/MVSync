@@ -60,8 +60,9 @@ impl Queue {
             for mut task in tasks.drain(..) {
                 if task.can_execute() {
                     if task.is_panicked() {
-                        let (future, signal) =  task.execute();
-                        future.await_sync();
+                        let p = task.get_panic();
+                        task.state().write().unwrap().replace(TaskState::Panicked(p));
+                        let (_, signal) =  task.execute();
                         for signal in signal {
                             signal.signal();
                         }
@@ -225,9 +226,6 @@ impl WorkerThread {
             });
 
             if futures.is_empty() {
-                if receiver.is_empty() {
-                    break;
-                }
                 signal.wait();
             }
         }

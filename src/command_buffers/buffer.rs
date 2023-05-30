@@ -364,13 +364,17 @@ impl CommandBufferEntry for CommandBuffer {
 
 /// The trait that defines a buffered command. To add custom commands that take in a type [`T`],
 /// you need to define a trait which extends this trait:
+///
+/// Now, if some other command returns your type [`T`], as a [`BufferedCommand<T>`], you can call
+/// your custom function from the buffered command:
+///
 /// ```
+/// use std::sync::Arc;
 /// use mvsync::prelude::*;
 ///
 /// struct MyType;
 ///
 /// struct ReturnType;
-///
 /// //Define our trait with our custom command.
 /// pub trait CustomFunction: Command<MyType> {
 ///     fn custom_function(self) -> BufferedCommand<ReturnType> {
@@ -382,29 +386,36 @@ impl CommandBufferEntry for CommandBuffer {
 ///
 /// //Implement it for all buffered commands.
 /// impl<T: Command<MyType>> CustomFunction for T {}
-/// ```
-///
-/// Now, if some other command returns your type [`T`], as a [`BufferedCommand<T>`], you can call
-/// your custom function from the buffered command:
-///
-/// ```
-/// use std::sync::Arc;
-/// use mvsync::prelude::*;
 ///
 /// let sync = MVSync::new(MVSyncSpecs::default());
 /// let queue: Arc<Queue> = sync.get_queue();
 /// let command_buffer: CommandBuffer = sync.allocate_command_buffer().unwrap();
 ///
-/// let result: TaskHandle<ReturnType> = command_buffer
-///     .some_command() //Assume this adds a function that returns `MyType`, wrapped in a `BufferedCommand<MyType>`
+/// let response = command_buffer
+///     .add_sync_command(|| MyType) //Assume this adds a function that returns `MyType`, wrapped in a `BufferedCommand<MyType>`
 ///     .custom_function() //We can call our custom command.
-///     .result(); //We get the result of our custom command.
+///     .response(); //We get the result of our custom command.
+///
+/// let handle: TaskHandle<ReturnType> = response.0;
+/// let controllers: Vec<TaskController> = response.1;
 ///
 /// command_buffer.finish();
 ///
 /// queue.submit_command_buffer(command_buffer); //We can submit this command buffer now.
 ///
-/// let ret: ReturnType = result.wait(); //We wait for our command chain to finish.
+/// let ret: TaskResult<ReturnType> = handle.wait(); //We wait for our command chain to finish.
+///
+/// match ret {
+///    TaskResult::Returned(ret) => {
+///        //The command buffer returned successfully.
+///    }
+///    TaskResult::Panicked(boxed_panic_value) => {
+///        //The command buffer panicked.
+///    }
+///    TaskResult::Cancelled => {
+///        //The command buffer was cancelled.
+///    }
+/// }
 /// ```
 pub trait Command<T: MVSynced>: Sized + Sealed {
     /// Get the parent command buffer, which is where the raw tasks are stored. Do not call this

@@ -183,6 +183,14 @@ impl Task {
         matches!(&*self.state.read().unwrap(), TaskState::Panicked(_))
     }
 
+    pub(crate) fn get_panic(&self) -> Box<dyn Any + Send + 'static> {
+        let p = self.state.write().unwrap().take();
+        match p {
+            TaskState::Panicked(p) => p,
+            _ => panic!("Tired to get the panic value of non-panicking function!")
+        }
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         *self.state.read().unwrap() == TaskState::Cancelled ||
             *self.self_state.read().unwrap() == TaskState::Cancelled

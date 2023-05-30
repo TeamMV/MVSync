@@ -185,8 +185,7 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MVSync, MVSyncSpecs};
-    use crate::utils::async_sleep_ms;
+    use crate::prelude::*;
 
     #[test]
     fn it_works() {
@@ -198,24 +197,21 @@ mod tests {
 
         let queue = sync.get_queue();
 
-        let (task_a, a) = sync.create_async_task(|| async move {
-            for i in 0..10 {
-                println!("A: {}", i);
-                async_sleep_ms(1000).await;
-            }
-        });
+        let buffer = sync.allocate_command_buffer().unwrap();
 
-        let (task_b, b) = sync.create_async_task(|| async move {
-            for i in 0..10 {
-                println!("B: {}", i);
-                async_sleep_ms(1000).await;
-            }
-        });
+        let (result, controllers) = buffer.add_command(|| async move {
+            panic!("Hello");
+            return "Hi".to_string();
+        }).add_command(|s| async move {
+            println!("{}", s);
+        }).response();
 
-        queue.submit(task_a);
-        queue.submit(task_b);
+        buffer.finish();
 
-        a.wait();
-        b.wait();
+        queue.submit_command_buffer(buffer);
+
+        if let TaskResult::Panicked(p) = result.wait() {
+            println!("{}", *p.downcast::<&str>().unwrap());
+        }
     }
 }
