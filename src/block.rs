@@ -1,6 +1,8 @@
 use std::any::Any;
+use std::cell::UnsafeCell;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ops::Deref;
+use std::panic::{AssertUnwindSafe, catch_unwind, RefUnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -19,16 +21,14 @@ impl<F: Future> AwaitSync for F {}
 
 pub(crate) struct Signal {
     ready: Mutex<bool>,
-    condition: Condvar,
-    waker: Mutex<Nullable<Waker>>,
+    condition: Condvar
 }
 
 impl Signal {
     pub(crate) fn new() -> Self {
         Self {
             ready: Mutex::new(false),
-            condition: Condvar::new(),
-            waker: Mutex::new(Nullable::null())
+            condition: Condvar::new()
         }
     }
 
@@ -49,11 +49,6 @@ impl Wake for Signal {
     fn wake(self: Arc<Self>) {
         let mut ready = self.ready.lock().recover();
         *ready = true;
-        let waker = self.waker.lock().recover();
-        if !waker.is_null() {
-            waker.clone().wake();
-        }
-        drop(waker);
         self.condition.notify_one();
     }
 }
@@ -64,35 +59,9 @@ impl Drop for Signal {
     }
 }
 
-pub struct AsyncSignal {
-    signal: Arc<Signal>
-}
-
-impl AsyncSignal {
-    pub(crate) fn new() -> Self {
-        Self {
-            signal: Arc::new(Signal::new())
-        }
-    }
-}
-
-impl Future for AsyncSignal {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.signal.ready() {
-            Poll::Ready(())
-        }
-        else {
-            *self.signal.waker.lock().recover() = UnsafeRef::new(cx.waker());
-            Poll::Pending
-        }
-    }
-}
-
 /// Poll a future to completion, blocking the current thread until it is done.
 pub fn await_sync<R>(mut future: impl Future<Output = R>) -> R {
-    let mut future = unsafe { std::pin::Pin::new_unchecked(&mut future) };
+    let mut future = unsafe { Pin::new_unchecked(&mut future) };
     let signal = Arc::new(Signal::new());
     let waker = Waker::from(signal.clone());
     let mut ctx = Context::from_waker(&waker);

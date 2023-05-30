@@ -85,6 +85,16 @@ impl Fence {
     pub fn wait(&self) {
         self.signalled.clone().expect("Checking unbound fence!").wait()
     }
+
+    /// Block the current thread until the fence is signaled, indicating that the task
+    /// this fence is bound to has finished.
+    ///
+    /// # Note
+    /// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
+    /// Counter fences are planned to be added in the future.
+    pub async fn wait_async(&self) {
+        self.signalled.clone().expect("Checking unbound fence!").wait()
+    }
 }
 
 id_eq!(Semaphore, Fence);

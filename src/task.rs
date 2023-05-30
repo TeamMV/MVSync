@@ -249,6 +249,11 @@ impl TaskController {
     pub fn wait(&self) {
         self.signal.wait();
     }
+
+    /// Waits asynchronously for this task to finish executing.
+    pub async fn wait_async(&self) {
+        self.signal.wait();
+    }
 }
 
 impl Clone for TaskController {
@@ -294,9 +299,22 @@ impl<T: MVSynced> TaskHandle<T> {
     }
 
     /// Waits until the [`Task`] has finished executing, and return the result of the task. If the [`Task`],
-    /// or any of its predecessors, have panicked, this function will return [`None`], otherwise, it will
-    /// return [`Some(T)`].
+    /// or any of its predecessors, have panicked, this function will return [`Panicked(Box<dyn Any + Send + 'static>)`], otherwise, it will
+    /// return [`Returned(T)`].
     pub fn wait(self) -> TaskResult<T> {
+        self.signal.wait();
+        match self.state.write().unwrap().take() {
+            TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
+            TaskState::Panicked(p) => return TaskResult::Panicked(p),
+            TaskState::Cancelled => return TaskResult::Cancelled,
+            TaskState::Pending => panic!("Function finished but is still pending!")
+        }
+    }
+
+    /// Waits asynchronously until the [`Task`] has finished executing, and return the result of the task. If the [`Task`],
+    /// or any of its predecessors, have panicked, this function will return [`Panicked(Box<dyn Any + Send + 'static>)`], otherwise, it will
+    /// return [`Returned(T)`].
+    pub async fn wait_async(self) -> TaskResult<T> {
         self.signal.wait();
         match self.state.write().unwrap().take() {
             TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
