@@ -3,12 +3,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use crossbeam_channel::{Receiver, Sender, unbounded as channel};
 use mvutils::id_eq;
 use mvutils::utils::next_id;
-use crate::block::{AwaitSync, Signal};
+use crate::block::Signal;
 use crate::MVSyncSpecs;
 use crate::task::{Task, TaskState};
 
@@ -149,20 +149,24 @@ struct WorkerThread {
     id: u64,
     sender: Sender<Task>,
     label: Option<String>,
-    free_workers: Arc<AtomicU32>
+    free_workers: Arc<AtomicU32>,
+    signal: Arc<Signal>
 }
 
 impl WorkerThread {
     fn new(specs: MVSyncSpecs) -> Self {
+        let signal = Arc::new(Signal::new());
         let (sender, receiver) = channel();
         let free_workers = Arc::new(AtomicU32::new(specs.workers_per_thread));
         let access = free_workers.clone();
-        let _thread = thread::spawn(move || Self::run(receiver, access));
+        let signal_clone = signal.clone();
+        let _thread = thread::spawn(move || Self::run(receiver, access, signal_clone));
         WorkerThread {
             id: next_id("MVSync"),
             sender,
             label: None,
-            free_workers
+            free_workers,
+            signal
         }
     }
 
@@ -174,8 +178,7 @@ impl WorkerThread {
         self.label.as_ref()
     }
 
-    fn run(receiver: Receiver<Task>, free_workers: Arc<AtomicU32>) {
-        let signal = Arc::new(Signal::new());
+    fn run(receiver: Receiver<Task>, free_workers: Arc<AtomicU32>, signal: Arc<Signal>) {
         let waker = Waker::from(signal.clone());
         let mut ctx = Context::from_waker(&waker);
         let mut futures = Vec::new();
@@ -215,7 +218,6 @@ impl WorkerThread {
                         false
                     }
                     Ok(Poll::Ready(_)) => {
-                        state.write().unwrap().replace(TaskState::Ready);
                         free_workers.fetch_add(1, Ordering::SeqCst);
                         for s in to_signal {
                             s.signal();
@@ -225,7 +227,7 @@ impl WorkerThread {
                 }
             });
 
-            if futures.is_empty() {
+            if !futures.is_empty() && receiver.is_empty() {
                 signal.wait();
             }
         }
@@ -234,6 +236,7 @@ impl WorkerThread {
     fn send(&self, task: Task) {
         self.sender.send(task).expect("Failed to send task!");
         self.free_workers.fetch_sub(1, Ordering::SeqCst);
+        self.signal.clone().wake();
     }
 
     fn free_workers(&self) -> u32 {

@@ -28,7 +28,12 @@ impl TaskState {
     }
 
     fn take(&mut self) -> TaskState {
-        std::mem::replace(self, TaskState::Pending)
+        match self {
+            TaskState::Pending => TaskState::Pending,
+            TaskState::Ready => TaskState::Ready,
+            TaskState::Panicked(_) => TaskState::Panicked(Box::new(())),
+            TaskState::Cancelled => TaskState::Cancelled
+        }
     }
 }
 

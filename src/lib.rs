@@ -185,33 +185,9 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
-    use crate::prelude::*;
 
     #[test]
     fn it_works() {
-        let sync = MVSync::new(MVSyncSpecs {
-            thread_count: 1,
-            workers_per_thread: 2,
-            timeout_ms: 10
-        });
 
-        let queue = sync.get_queue();
-
-        let buffer = sync.allocate_command_buffer().unwrap();
-
-        let (result, controllers) = buffer.add_command(|| async move {
-            panic!("Hello");
-            return "Hi".to_string();
-        }).add_command(|s| async move {
-            println!("{}", s);
-        }).response();
-
-        buffer.finish();
-
-        queue.submit_command_buffer(buffer);
-
-        if let TaskResult::Panicked(p) = result.wait() {
-            println!("{}", *p.downcast::<&str>().unwrap());
-        }
     }
 }

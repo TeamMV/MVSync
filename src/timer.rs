@@ -4,23 +4,30 @@ use std::thread;
 use std::task::{Waker, Context, Poll};
 use std::pin::Pin;
 use std::collections::BinaryHeap;
-use std::cmp::Reverse;
 use std::future::Future;
+use mvutils::lazy;
 use mvutils::once::Lazy;
+use mvutils::utils::Recover;
 
 pub struct Sleep {
+    duration: Duration,
     when: Instant,
+    started: bool
 }
 
-static TIMER_QUEUE: Lazy<Arc<Mutex<BinaryHeap<Reverse<TimerEntry>>>>> = Lazy::new(|| Arc::new(Mutex::new(BinaryHeap::new())));
-static TIMER_CVAR: Lazy<Condvar> = Lazy::new(Condvar::new);
-static TIMER_THREAD: Lazy<Once> = Lazy::new(Once::new);
+lazy! {
+    static TIMER_QUEUE: Arc<Mutex<BinaryHeap<TimerEntry>>> = Arc::new(Mutex::new(BinaryHeap::new()));
+    static TIMER_CVAR: Condvar = Condvar::new();
+    static INIT: Once = Once::new();
+}
 
 impl Sleep {
-    pub(crate) fn new(when: Duration) -> Self {
-        TIMER_THREAD.call_once(start_timer_thread);
+    pub(crate) fn new(duration: Duration) -> Self {
+        INIT.call_once(start_timer_thread);
         Sleep {
-            when: Instant::now() + when,
+            duration,
+            when: Instant::now(),
+            started: false
         }
     }
 }
@@ -29,15 +36,22 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if Instant::now() >= self.when {
+        if !self.started {
+            let this = self .get_mut();
+            this.when = Instant::now() + this.duration;
+            this.started = true;
+            let mut queue = TIMER_QUEUE.lock().recover();
+            queue.push(TimerEntry {
+                when: this.when,
+                waker: cx.waker().clone(),
+            });
+            drop(queue);
+            TIMER_CVAR.notify_one();
+            Poll::Pending
+        }
+        else if Instant::now() >= self.when {
             Poll::Ready(())
         } else {
-            let mut queue = TIMER_QUEUE.lock().unwrap();
-            queue.push(Reverse(TimerEntry {
-                when: self.when,
-                waker: cx.waker().clone(),
-            }));
-            TIMER_CVAR.notify_one();
             Poll::Pending
         }
     }
@@ -69,26 +83,27 @@ impl PartialEq for TimerEntry {
 impl Eq for TimerEntry {}
 
 fn start_timer_thread() {
-    let queue_clone = TIMER_QUEUE.clone();
-    thread::spawn(move || {
+    thread::spawn(|| {
         loop {
-            let mut queue = queue_clone.lock().unwrap();
-            while let Some(Reverse(ref next)) = queue.peek() {
-                let now = Instant::now();
-                if now >= next.when {
-                    let Reverse(timed_out) = queue.pop().unwrap();
-                    timed_out.waker.wake();
-                } else {
-                    let wait_duration = if now > next.when {
-                        Duration::from_secs(0)
-                    } else {
-                        next.when.duration_since(now)
-                    };
-                    let (lock, timeout_result) = TIMER_CVAR.wait_timeout(queue, wait_duration).unwrap();
-                    queue = lock;
-                    if timeout_result.timed_out() {
-                        continue;
+            let next = TIMER_QUEUE.lock().recover().peek().map(|e| e.when);
+            match next {
+                Some(t) => {
+                    let now = Instant::now();
+                    if now >= t {
+                        let next = TIMER_QUEUE.lock().recover().pop().unwrap();
+                        next.waker.wake();
                     }
+                    else {
+                        let wait_duration = if now > t {
+                            Duration::from_secs(0)
+                        } else {
+                            t.duration_since(now)
+                        };
+                        let (_queue, _) = TIMER_CVAR.wait_timeout(TIMER_QUEUE.lock().recover(), wait_duration).recover();
+                    }
+                }
+                None => {
+                    let _queue = TIMER_CVAR.wait(TIMER_QUEUE.lock().recover()).recover();
                 }
             }
         }

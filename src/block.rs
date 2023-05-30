@@ -44,6 +44,12 @@ impl Wake for Signal {
     }
 }
 
+impl Drop for Signal {
+    fn drop(&mut self) {
+        self.condition.notify_one();
+    }
+}
+
 /// Poll a future to completion, blocking the current thread until it is done.
 pub fn await_sync<R>(mut future: impl Future<Output = R>) -> R {
     let mut future = unsafe { std::pin::Pin::new_unchecked(&mut future) };
