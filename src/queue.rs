@@ -2,7 +2,7 @@ use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use crossbeam_channel::{Receiver, Sender, unbounded as channel};
@@ -36,7 +36,7 @@ impl Queue {
             }
         });
         let clone = signal.clone();
-        let _manager = thread::spawn(move || Self::run(receiver, threads, clone));
+        thread::spawn(move || Self::run(receiver, threads, clone));
         Queue {
             id: next_id("MVSync"),
             sender,
@@ -202,12 +202,14 @@ impl Queue {
     }
 }
 
-struct WorkerThread {
-    id: u64,
-    sender: Sender<Task>,
-    label: Option<String>,
-    free_workers: Arc<AtomicU32>,
-    signal: Arc<Signal>
+pub(crate) struct WorkerThread {
+    pub(crate) id: u64,
+    pub(crate) sender: Sender<Task>,
+    pub(crate) label: Option<String>,
+    pub(crate) free_workers: Arc<AtomicU32>,
+    #[cfg(feature = "main-thread")]
+    pub(crate) end: Arc<AtomicU8>,
+    pub(crate) signal: Arc<Signal>
 }
 
 impl WorkerThread {
@@ -217,12 +219,18 @@ impl WorkerThread {
         let free_workers = Arc::new(AtomicU32::new(specs.workers_per_thread));
         let access = free_workers.clone();
         let signal_clone = signal.clone();
-        let _thread = thread::spawn(move || Self::run(receiver, access, signal_clone));
+        #[cfg(feature = "main-thread")]
+        let end = Arc::new(AtomicU8::new(0));
+        #[cfg(feature = "main-thread")]
+        let end_clone = end.clone();
+        thread::spawn(move || Self::run(receiver, access, signal_clone, #[cfg(feature = "main-thread")] end_clone, #[cfg(feature = "main-thread")] false));
         WorkerThread {
             id: next_id("MVSync"),
             sender,
             label: None,
             free_workers,
+            #[cfg(feature = "main-thread")]
+            end,
             signal
         }
     }
@@ -235,13 +243,17 @@ impl WorkerThread {
         self.label.as_ref()
     }
 
-    fn run(receiver: Receiver<Task>, free_workers: Arc<AtomicU32>, signal: Arc<Signal>) {
+    pub(crate) fn run(receiver: Receiver<Task>, free_workers: Arc<AtomicU32>, signal: Arc<Signal>, #[cfg(feature = "main-thread")] end: Arc<AtomicU8>,  #[cfg(feature = "main-thread")] end_when_done: bool) {
         let waker = Waker::from(signal.clone());
         let mut ctx = Context::from_waker(&waker);
         let mut futures = Vec::new();
 
         loop {
             if futures.is_empty() {
+                #[cfg(feature = "main-thread")]
+                if end.load(Ordering::Relaxed) > 0 || (end_when_done && receiver.is_empty()) {
+                    break;
+                }
                 match receiver.recv() {
                     Ok(task) => futures.push((task.state(), task.execute())),
                     Err(_) => break
@@ -297,12 +309,29 @@ impl WorkerThread {
                 signal.wait();
             }
         }
+        #[cfg(feature = "main-thread")]
+        end.store(2, Ordering::SeqCst);
     }
 
-    fn send(&self, task: Task) {
+    pub(crate) fn send(&self, task: Task) {
         self.sender.send(task).expect("Failed to send task!");
         self.free_workers.fetch_sub(1, Ordering::SeqCst);
         self.signal.clone().wake();
+    }
+
+    #[cfg(feature = "main-thread")]
+    pub(crate) fn end(&self) {
+        self.end.store(1, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "main-thread")]
+    pub(crate) fn ended(&self) -> bool {
+        self.end.load(Ordering::Relaxed) > 0
+    }
+
+    #[cfg(feature = "main-thread")]
+    pub(crate) fn finished(&self) -> bool {
+        self.end.load(Ordering::Relaxed) > 1
     }
 
     fn free_workers(&self) -> u32 {
