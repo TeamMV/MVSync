@@ -56,48 +56,45 @@ impl<T> MVSynced for T where T: Send + Sync + 'static {}
 /// Main structure for managing multithreaded asynchronous tasks.
 pub struct MVSync {
     id: u64,
-    specs: MVSyncSpecs,
     queue: Arc<Queue>,
     signal: Arc<Signal>
 }
 
 impl MVSync {
     /// Create a new MVSync instance.
-    pub fn new(specs: MVSyncSpecs) -> MVSync {
+    pub fn new(specs: MVSyncSpecs) -> Arc<MVSync> {
         next_id("MVSync");
         let signal = Arc::new(Signal::new());
-        MVSync {
+        Arc::new(MVSync {
             id: next_id("MVSync"),
-            specs,
             queue: Arc::new(Queue::new(specs, vec![], signal.clone())),
             signal
-        }
+        })
     }
 
     /// Create a new MVSync instance.
-    pub fn labelled(specs: MVSyncSpecs, labels: Vec<&'static str>) -> MVSync {
+    pub fn labelled(specs: MVSyncSpecs, labels: Vec<&'static str>) -> Arc<MVSync> {
         next_id("MVSync");
         let signal = Arc::new(Signal::new());
-        MVSync {
+        Arc::new(MVSync {
             id: next_id("MVSync"),
-            specs,
             queue: Arc::new(Queue::new(specs, labels.into_iter().map(ToString::to_string).collect(), signal.clone())),
             signal
-        }
+        })
     }
 
     /// Get the MVSync queue bound to this [`MVSync`] instance.
-    pub fn get_queue(&self) -> Arc<Queue> {
+    pub fn get_queue(self: &Arc<MVSync>) -> Arc<Queue> {
         self.queue.clone()
     }
 
     /// Create a [`Semaphore`]
-    pub fn create_semaphore(&self) -> Arc<Semaphore> {
+    pub fn create_semaphore(self: &Arc<MVSync>) -> Arc<Semaphore> {
         Arc::new(Semaphore::new())
     }
 
     /// Create a [`Fence`]
-    pub fn create_fence(&self) -> Arc<Fence> {
+    pub fn create_fence(self: &Arc<MVSync>) -> Arc<Fence> {
         Arc::new(Fence::new())
     }
 
@@ -107,12 +104,12 @@ impl MVSync {
     /// # Returns:
     /// - [`Ok(CommandBuffer)`] if the command buffer was successfully allocated.
     /// - [`Err(CommandBufferAllocationError)`] if the command buffer could not be allocated on the heap.
-    pub fn allocate_command_buffer(&self) -> Result<CommandBuffer, CommandBufferAllocationError> {
+    pub fn allocate_command_buffer(self: &Arc<MVSync>) -> Result<CommandBuffer, CommandBufferAllocationError> {
         CommandBuffer::new(self.signal.clone())
     }
 
     /// Create a new [`Task`], wrapping a synchronous function that returns a value.
-    pub fn create_task<T: MVSynced>(&self, function: impl FnOnce() -> T + Send + 'static) -> (Task, TaskHandle<T>) {
+    pub fn create_task<T: MVSynced>(self: &Arc<MVSync>, function: impl FnOnce() -> T + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
         let signal = Arc::new(Signal::new());
@@ -123,7 +120,7 @@ impl MVSync {
 
     /// Create a new [`Task`], wrapping a synchronous function that takes in a parameter from a
     /// previous function,  returning a value.
-    pub fn create_continuation<T: MVSynced, R: MVSynced>(&self, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
+    pub fn create_continuation<T: MVSynced, R: MVSynced>(self: &Arc<MVSync>, function: impl FnOnce(T) -> R + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
         let signal = Arc::new(Signal::new());
@@ -133,7 +130,7 @@ impl MVSync {
     }
 
     /// Create a new [`Task`], wrapping an asynchronous function that returns a value.
-    pub fn create_async_task<T: MVSynced, F: Future<Output = T> + Send>(&self, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskHandle<T>) {
+    pub fn create_async_task<T: MVSynced, F: Future<Output = T> + Send>(self: &Arc<MVSync>, function: impl FnOnce() -> F + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
         let signal = Arc::new(Signal::new());
@@ -143,7 +140,7 @@ impl MVSync {
     }
 
     /// Create a new [`Task`], wrapping a future that returns a value.
-    pub fn create_future_task<T: MVSynced>(&self, function: impl Future<Output = T> + Send + 'static) -> (Task, TaskHandle<T>) {
+    pub fn create_future_task<T: MVSynced>(self: &Arc<MVSync>, function: impl Future<Output = T> + Send + 'static) -> (Task, TaskHandle<T>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
         let signal = Arc::new(Signal::new());
@@ -154,7 +151,7 @@ impl MVSync {
 
     /// Create a new [`Task`], wrapping an asynchronous function that takes in a parameter from a
     /// previous function,  returning a value.
-    pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(&self, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
+    pub fn create_async_continuation<T: MVSynced, R: MVSynced, F: Future<Output = R> + Send>(self: &Arc<MVSync>, function: impl FnOnce(T) -> F + Send + 'static, predecessor: TaskHandle<T>) -> (Task, TaskHandle<R>) {
         let buffer = Arc::new(RwLock::new(None));
         let state = Arc::new(RwLock::new(TaskState::Pending));
         let signal = Arc::new(Signal::new());
@@ -193,7 +190,7 @@ impl Default for MVSyncSpecs {
 mod tests {
     use crate::{MVSync, MVSyncSpecs};
     use crate::prelude::{Command, CommandBufferEntry};
-    use crate::utils::async_sleep_ms;
+    use crate::utils::async_yield;
 
     #[test]
     fn it_works() {
@@ -207,16 +204,11 @@ mod tests {
         let buffer = sync.allocate_command_buffer().unwrap();
 
         let (a, _) = buffer.add_command(|| async move {
-            async_sleep_ms(1000).await;
-            "Hi"
-        }).add_command(|s| async move {
-            async_sleep_ms(1000).await;
-            println!("{}", s);
+            run("A").await;
         }).response();
 
         let (b, _) = buffer.add_command(|| async move {
-            async_sleep_ms(1000).await;
-            println!("Bye");
+            run("B").await;
         }).response();
 
         buffer.finish();
@@ -225,5 +217,12 @@ mod tests {
 
         a.wait();
         b.wait();
+    }
+
+    async fn run(name: &str) {
+        for i in 0..10 {
+            println!("{}: {}", name, i);
+            async_yield().await;
+        }
     }
 }

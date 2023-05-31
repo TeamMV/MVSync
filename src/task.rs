@@ -2,8 +2,6 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
-use std::thread;
-use std::time::Duration;
 use mvutils::id_eq;
 use mvutils::utils::next_id;
 use crate::block::Signal;
@@ -304,9 +302,9 @@ impl<T: MVSynced> TaskHandle<T> {
     pub fn wait(self) -> TaskResult<T> {
         self.signal.wait();
         match self.state.write().unwrap().take() {
-            TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
-            TaskState::Panicked(p) => return TaskResult::Panicked(p),
-            TaskState::Cancelled => return TaskResult::Cancelled,
+            TaskState::Ready => TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
+            TaskState::Panicked(p) => TaskResult::Panicked(p),
+            TaskState::Cancelled => TaskResult::Cancelled,
             TaskState::Pending => panic!("Function finished but is still pending!")
         }
     }
@@ -317,9 +315,9 @@ impl<T: MVSynced> TaskHandle<T> {
     pub async fn wait_async(self) -> TaskResult<T> {
         self.signal.wait();
         match self.state.write().unwrap().take() {
-            TaskState::Ready => return TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
-            TaskState::Panicked(p) => return TaskResult::Panicked(p),
-            TaskState::Cancelled => return TaskResult::Cancelled,
+            TaskState::Ready => TaskResult::Returned(self.inner.write().unwrap().take().unwrap()),
+            TaskState::Panicked(p) => TaskResult::Panicked(p),
+            TaskState::Cancelled => TaskResult::Cancelled,
             TaskState::Pending => panic!("Function finished but is still pending!")
         }
     }

@@ -1,12 +1,9 @@
 use std::any::Any;
-use std::cell::UnsafeCell;
 use std::future::Future;
-use std::ops::Deref;
-use std::panic::{AssertUnwindSafe, catch_unwind, RefUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
-use mvutils::unsafe_utils::{Nullable, UnsafeRef};
 use mvutils::utils::Recover;
 
 pub trait AwaitSync: Future + Sized {
