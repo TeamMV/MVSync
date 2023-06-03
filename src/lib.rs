@@ -28,12 +28,18 @@
 
 use std::future::Future;
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "main-thread")]
 use std::sync::atomic::{AtomicU32, AtomicU8};
+#[cfg(feature = "main-thread")]
 use crossbeam_channel::unbounded as channel;
 use mvutils::id_eq;
-use mvutils::utils::{next_id, Recover};
+use mvutils::utils::next_id;
+#[cfg(feature = "main-thread")]
+use mvutils::utils::Recover;
 use crate::block::Signal;
-use crate::queue::{Queue, WorkerThread};
+use crate::queue::Queue;
+#[cfg(feature = "main-thread")]
+use crate::queue::WorkerThread;
 use crate::sync::{Fence, Semaphore};
 use crate::task::{Task, TaskHandle, TaskState};
 

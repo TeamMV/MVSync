@@ -16,8 +16,8 @@ pub struct Sleep {
 }
 
 lazy! {
-    static TIMER_QUEUE: Arc<Mutex<BinaryHeap<TimerEntry>>> = Arc::new(Mutex::new(BinaryHeap::new()));
-    static TIMER_CVAR: Condvar = Condvar::new();
+    static QUEUE: Arc<Mutex<BinaryHeap<TimerEntry>>> = Arc::new(Mutex::new(BinaryHeap::new()));
+    static SIGNAL: Condvar = Condvar::new();
     static INIT: Once = Once::new();
 }
 
@@ -40,13 +40,13 @@ impl Future for Sleep {
             let this = self .get_mut();
             this.when = Instant::now() + this.duration;
             this.started = true;
-            let mut queue = TIMER_QUEUE.lock().recover();
+            let mut queue = QUEUE.lock().recover();
             queue.push(TimerEntry {
                 when: this.when,
                 waker: cx.waker().clone(),
             });
             drop(queue);
-            TIMER_CVAR.notify_one();
+            SIGNAL.notify_one();
             Poll::Pending
         }
         else if Instant::now() >= self.when {
@@ -85,12 +85,12 @@ impl Eq for TimerEntry {}
 fn start_timer_thread() {
     thread::spawn(|| {
         loop {
-            let next = TIMER_QUEUE.lock().recover().peek().map(|e| e.when);
+            let next = QUEUE.lock().recover().peek().map(|e| e.when);
             match next {
                 Some(t) => {
                     let now = Instant::now();
                     if now >= t {
-                        let next = TIMER_QUEUE.lock().recover().pop().unwrap();
+                        let next = QUEUE.lock().recover().pop().unwrap();
                         next.waker.wake();
                     }
                     else {
@@ -99,11 +99,11 @@ fn start_timer_thread() {
                         } else {
                             t.duration_since(now)
                         };
-                        let (_queue, _) = TIMER_CVAR.wait_timeout(TIMER_QUEUE.lock().recover(), wait_duration).recover();
+                        let (_queue, _) = SIGNAL.wait_timeout(QUEUE.lock().recover(), wait_duration).recover();
                     }
                 }
                 None => {
-                    let _queue = TIMER_CVAR.wait(TIMER_QUEUE.lock().recover()).recover();
+                    let _queue = SIGNAL.wait(QUEUE.lock().recover()).recover();
                 }
             }
         }

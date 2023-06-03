@@ -2,7 +2,9 @@ use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "main-thread")]
+use std::sync::atomic::AtomicU8;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use crossbeam_channel::{Receiver, Sender, unbounded as channel};
