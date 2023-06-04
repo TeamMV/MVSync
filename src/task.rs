@@ -64,6 +64,7 @@ impl Task {
             signal,
             semaphores: Vec::new(),
             preferred_thread: None,
+            not_on: Vec::new(),
             self_state,
             state
         }
