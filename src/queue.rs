@@ -94,7 +94,14 @@ impl Queue {
 
                     let target_thread = match task.get_preferred_thread() {
                         Some(label) => threads.iter().find(|thread| thread.get_label() == Some(label)),
-                        None => threads.iter().max_by_key(|thread| thread.free_workers()),
+                        None => threads.iter().filter(|t| {
+                            if let Some(label) = t.get_label() {
+                                !task.get_not_on().contains(label)
+                            }
+                            else {
+                                true
+                            }
+                        }).max_by_key(|thread| thread.free_workers()),
                     };
 
                     if let Some(thread) = target_thread {
@@ -107,6 +114,9 @@ impl Queue {
                         if task.get_preferred_thread().is_some() {
                             // Thread with the label doesn't exist
                             task.remove_preferred_thread();
+                        }
+                        else {
+                            task.clear_not_on();
                         }
                         remaining_tasks.push(task);
                     }

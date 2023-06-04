@@ -50,6 +50,7 @@ pub struct Task {
     signal: [Arc<Signal>; 2],
     semaphores: Vec<Arc<Semaphore>>,
     preferred_thread: Option<String>,
+    not_on: Vec<String>,
     self_state: Arc<RwLock<TaskState>>,
     state: Arc<RwLock<TaskState>>
 }
@@ -170,6 +171,18 @@ impl Task {
 
     pub fn remove_preferred_thread(&mut self) {
         self.preferred_thread = None;
+    }
+
+    pub fn not_on(&mut self, thread: String) {
+        self.not_on.push(thread);
+    }
+
+    pub fn clear_not_on(&mut self) {
+        self.not_on.clear();
+    }
+
+    pub fn get_not_on(&self) -> &[String] {
+        &self.not_on
     }
 
     pub fn get_preferred_thread(&self) -> Option<&String> {
