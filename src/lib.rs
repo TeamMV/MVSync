@@ -48,6 +48,7 @@ use crate::command_buffers::buffer::{CommandBuffer, CommandBufferAllocationError
 
 pub mod prelude;
 
+pub(crate) mod run;
 pub mod queue;
 pub mod task;
 pub mod sync;

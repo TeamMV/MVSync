@@ -25,24 +25,28 @@ use crate::command_buffers::buffer::CommandBuffer;
 pub struct Queue {
     id: u64,
     sender: Sender<Task>,
-    signal: Arc<Signal>
+    signal: Arc<Signal>,
+    specs: MVSyncSpecs
 }
 
 impl Queue {
     pub(crate) fn new(specs: MVSyncSpecs, labels: Vec<String>, signal: Arc<Signal>) -> Self {
         let (sender, receiver) = channel();
-        let mut threads = (0..specs.thread_count).map(|_| WorkerThread::new(specs)).collect::<Vec<_>>();
-        labels.iter().enumerate().for_each(|(i, label)| {
-            if i < threads.len() {
-                threads[i].label(label.clone());
-            }
-        });
-        let clone = signal.clone();
-        thread::spawn(move || Self::run(receiver, threads, clone));
+        if specs.thread_count > 0 {
+            let mut threads = (0..specs.thread_count).map(|_| WorkerThread::new(specs)).collect::<Vec<_>>();
+            labels.iter().enumerate().for_each(|(i, label)| {
+                if i < threads.len() {
+                    threads[i].label(label.clone());
+                }
+            });
+            let clone = signal.clone();
+            thread::spawn(move || Self::run(receiver, threads, clone));
+        }
         Queue {
             id: next_id("MVSync"),
             sender,
-            signal
+            signal,
+            specs
         }
     }
 
@@ -125,6 +129,10 @@ impl Queue {
     /// # Arguments
     /// task - The task to push to the back of the queue.
     pub fn submit(&self, task: Task) {
+        if self.specs.thread_count == 0 {
+            crate::run::run(task);
+            return;
+        }
         self.sender.send(task).expect("Failed to submit task!");
         self.signal.clone().wake();
     }
@@ -135,6 +143,10 @@ impl Queue {
     /// # Arguments
     /// tasks - The vec of tasks to push to the back of the queue.
     pub fn submit_all(&self, tasks: Vec<Task>) {
+        if self.specs.thread_count == 0 {
+            crate::run::run_all(tasks);
+            return;
+        }
         for task in tasks {
             self.sender.send(task).expect("Failed to submit task!");
         }
@@ -147,6 +159,10 @@ impl Queue {
     /// # Arguments
     /// task - The task to push to the back of the queue.
     pub fn submit_on(&self, mut task: Task, thread: &str) {
+        if self.specs.thread_count == 0 {
+            crate::run::run(task);
+            return;
+        }
         task.set_preferred_thread(thread.to_string());
         self.sender.send(task).expect("Failed to submit task!");
         self.signal.clone().wake();
@@ -158,6 +174,10 @@ impl Queue {
     /// # Arguments
     /// tasks - The vec of tasks to push to the back of the queue.
     pub fn submit_all_on(&self, tasks: Vec<Task>, thread: &str) {
+        if self.specs.thread_count == 0 {
+            crate::run::run_all(tasks);
+            return;
+        }
         for mut task in tasks {
             task.set_preferred_thread(thread.to_string());
             self.sender.send(task).expect("Failed to submit task!");
@@ -177,6 +197,10 @@ impl Queue {
     /// command_buffer - The command buffer to push to the back of the queue.
     #[cfg(feature = "command-buffers")]
     pub fn submit_command_buffer(&self, command_buffer: CommandBuffer) {
+        if self.specs.thread_count == 0 {
+            crate::run::run_all(command_buffer.tasks());
+            return;
+        }
         for task in command_buffer.tasks() {
             self.sender.send(task).expect("Failed to submit command buffer!");
         }
@@ -195,6 +219,10 @@ impl Queue {
     /// command_buffers - The vec of command buffers to push to the back of the queue.
     #[cfg(feature = "command-buffers")]
     pub fn submit_command_buffers(&self, command_buffers: Vec<CommandBuffer>) {
+        if self.specs.thread_count == 0 {
+            crate::run::run_all(command_buffers.into_iter().flat_map(|b| b.tasks()).collect());
+            return;
+        }
         for command_buffer in command_buffers {
             for task in command_buffer.tasks() {
                 self.sender.send(task).expect("Failed to submit command buffers!");
