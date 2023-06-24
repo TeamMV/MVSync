@@ -5,7 +5,15 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+codegen-units = 1
+debug = false
+
 [features]
+all = ["command-buffers", "main-thread"]
 command-buffers = []
 main-thread = []
 

@@ -89,7 +89,7 @@ impl Fence {
     /// If a fence is bound to multiple tasks, it will open as soon as the first task finishes.
     /// Counter fences are planned to be added in the future.
     pub async fn wait_async(&self) {
-        self.signalled.clone().expect("Checking unbound fence!").wait()
+        self.signalled.clone().expect("Checking unbound fence!").wait_async().await
     }
 }
 

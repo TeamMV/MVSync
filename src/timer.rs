@@ -37,7 +37,7 @@ impl Future for Sleep {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.started {
-            let this = self .get_mut();
+            let this = self.get_mut();
             this.when = Instant::now() + this.duration;
             this.started = true;
             let mut queue = QUEUE.lock().recover();
