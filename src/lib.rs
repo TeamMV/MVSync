@@ -16,14 +16,13 @@
 //!
 //! - [`sync`]\: Synchronization objects which provide a way of implementing control flow.
 //!
-//! - [`block`]\: Very simple 'poll to completion' awaiter. (Adapted from [`pollster`])
+//! - [`block`]\: Very simple 'poll to completion' awaiter.
 //!
 //! - [`utils`]\: Some simple async utility functions.
 //!
 //! - [`command buffers`]\: A higher-level API abstraction layer, which allows making custom tasks,
 //! as well as chaining tasks.
 //!
-//! [`pollster`]: https://crates.io/crates/pollster
 //! [`command buffers`]: command_buffers
 
 use std::future::Future;
