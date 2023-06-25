@@ -19,4 +19,4 @@ main-thread = []
 
 [dependencies]
 crossbeam-channel = "0.5.8"
-mvutils = { path = "../MVUtils" }
+mvutils = { path = "../MVUtils" } #temporary: https://github.com/TeamMV/MVUtils
