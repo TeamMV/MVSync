@@ -274,6 +274,24 @@ pub struct MVSyncSpecs {
     pub workers_per_thread: u32,
 }
 
+impl MVSyncSpecs {
+    pub fn max_performance(workers_per_thread: u32) -> Self {
+        let threads = num_cpus::get();
+        MVSyncSpecs {
+            thread_count: threads as u32 - 2,
+            workers_per_thread
+        }
+    }
+
+    pub fn all_cores(workers_per_thread: u32) -> Self {
+        let threads = num_cpus::get();
+        MVSyncSpecs {
+            thread_count: threads as u32,
+            workers_per_thread
+        }
+    }
+}
+
 impl Default for MVSyncSpecs {
     fn default() -> Self {
         MVSyncSpecs {
