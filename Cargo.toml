@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["Maxim Savenkov"]
+description = "A standalone async and worker thread library, with expandable traits and command buffers."
 
 [profile.release]
 opt-level = 3
