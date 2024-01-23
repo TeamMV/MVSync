@@ -45,6 +45,7 @@ pub trait Dbg<T: MVSynced + Debug>: Command<T> {
     /// returns the result so that more commands can be chained after this. This is essentially a
     /// method of inspecting the value midway through a command chain without consuming it or
     /// halting the command chain.
+    #[track_caller]
     fn dbg(self) -> BufferedCommand<T> {
         self.add_sync_command(|t| {
             let value = &t;

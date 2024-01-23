@@ -304,6 +304,7 @@ impl Default for MVSyncSpecs {
 
 #[cfg(test)]
 mod tests {
+    use std::thread::yield_now;
     use crate::{MVSync, MVSyncSpecs};
     use crate::utils::async_yield;
 
