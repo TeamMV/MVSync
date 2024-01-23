@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::collections::BinaryHeap;
 use std::future::Future;
 use mvutils::lazy;
-use mvutils::once::Lazy;
 use mvutils::utils::Recover;
 
 pub struct Sleep {
