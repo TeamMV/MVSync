@@ -16,14 +16,14 @@ pub trait AwaitSync: Future + Sized {
 
 impl<F: Future> AwaitSync for F {}
 
-pub(crate) struct Signal {
+pub struct Signal {
     ready: Mutex<bool>,
     condition: Condvar,
     wakers: Mutex<Vec<Waker>>
 }
 
 impl Signal {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             ready: Mutex::new(false),
             condition: Condvar::new(),
@@ -31,11 +31,11 @@ impl Signal {
         }
     }
 
-    pub(crate) fn ready(&self) -> bool {
+    pub fn ready(&self) -> bool {
         *self.ready.lock().recover()
     }
 
-    pub(crate) fn wait(&self) {
+    pub fn wait(&self) {
         let mut ready = self.ready.lock().recover();
         while !*ready {
             ready = self.condition.wait(ready).recover();
@@ -43,7 +43,7 @@ impl Signal {
         *ready = false;
     }
 
-    pub(crate) async fn wait_async(&self) {
+    pub async fn wait_async(&self) {
         SignalFuture {
             signal: self,
             started: false,
@@ -74,7 +74,7 @@ impl Drop for Signal {
 }
 
 
-pub(crate) struct SignalFuture<'a> {
+pub struct SignalFuture<'a> {
     signal: &'a Signal,
     started: bool
 }
