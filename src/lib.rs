@@ -54,6 +54,7 @@ pub mod sync;
 pub mod block;
 pub mod utils;
 pub mod timer;
+pub mod clock;
 #[cfg(feature = "command-buffers")]
 pub mod command_buffers;
 
