@@ -1,6 +1,6 @@
-use std::fmt::{Debug, Display};
 use crate::command_buffers::buffer::{BufferedCommand, Command};
 use crate::MVSynced;
+use std::fmt::{Debug, Display};
 
 pub trait End<T: MVSynced>: Command<T> {
     /// Ends the command chain by consuming the last return value and doing nothing with it. This
@@ -57,6 +57,20 @@ pub trait Dbg<T: MVSynced + Debug>: Command<T> {
 
 impl<T: MVSynced + Debug, C: Command<T>> Dbg<T> for C {}
 
+pub trait Inspect<T: MVSynced>: Command<T> {
+    /// Runs a side-effect function with a shared reference to the current value and returns the
+    /// original value unchanged. This is useful for logging, metrics, or validation in the middle
+    /// of a command chain without breaking the chain.
+    fn inspect(self, inspect: impl FnOnce(&T) + Send + 'static) -> BufferedCommand<T> {
+        self.add_sync_command(|t| {
+            inspect(&t);
+            t
+        })
+    }
+}
+
+impl<T: MVSynced, C: Command<T>> Inspect<T> for C {}
+
 pub trait Unwrap<T: MVSynced>: Command<Option<T>> {
     /// Unwraps the [`Option<T>`] value returned by the previous command, and returns the result if it
     /// was [`Some(T)`]. If the value was [`None`], it halts the entire command chain. This will lead to the
@@ -64,25 +78,19 @@ pub trait Unwrap<T: MVSynced>: Command<Option<T>> {
     ///
     /// [`TaskHandle<T>`]: crate::task::TaskHandle
     fn unwrap(self) -> BufferedCommand<T> {
-        self.add_sync_command(|t| {
-            t.unwrap()
-        })
+        self.add_sync_command(|t| t.unwrap())
     }
 
     /// Unwraps the [`Option<T>`] value returned by the previous command, and returns the result if it
     /// was [`Some(T)`]. If the value was [`None`], the default value provided is returned instead.
     fn unwrap_or(self, default: T) -> BufferedCommand<T> {
-        self.add_sync_command(|t| {
-            t.unwrap_or(default)
-        })
+        self.add_sync_command(|t| t.unwrap_or(default))
     }
 
     /// Unwraps the [`Option<T>`] value returned by the previous command, and returns the result if it
     /// was [`Some(T)`]. If the value was [`None`], the default value provided is returned instead.
     fn unwrap_or_else(self, default: impl FnOnce() -> T + Send + 'static) -> BufferedCommand<T> {
-        self.add_sync_command(|t| {
-            t.unwrap_or_else(default)
-        })
+        self.add_sync_command(|t| t.unwrap_or_else(default))
     }
 
     /// Unwraps the [`Option<T>`] value returned by the previous command, and returns the result if it
@@ -92,9 +100,7 @@ pub trait Unwrap<T: MVSynced>: Command<Option<T>> {
     /// [`TaskHandle<T>`]: crate::task::TaskHandle
     fn expect(self, msg: &str) -> BufferedCommand<T> {
         let msg = msg.to_string();
-        self.add_sync_command(move |t| {
-            t.expect(&msg)
-        })
+        self.add_sync_command(move |t| t.expect(&msg))
     }
 }
 
@@ -107,25 +113,19 @@ pub trait UnwrapOk<T: MVSynced, E: MVSynced + Debug>: Command<Result<T, E>> {
     ///
     /// [`TaskHandle<T>`]: crate::task::TaskHandle
     fn unwrap(self) -> BufferedCommand<T> {
-        self.add_sync_command(|t| {
-            t.unwrap()
-        })
+        self.add_sync_command(|t| t.unwrap())
     }
 
     /// Unwraps the [`Result<T, E>`] value returned by the previous command, and returns the result if it
     /// was [`Ok(T)`]. If the value was [`Err(E)`], the default value provided is returned instead.
     fn unwrap_or(self, default: T) -> BufferedCommand<T> {
-        self.add_sync_command(|t| {
-            t.unwrap_or(default)
-        })
+        self.add_sync_command(|t| t.unwrap_or(default))
     }
 
     /// Unwraps the [`Result<T, E>`] value returned by the previous command, and returns the result if it
     /// was [`Ok(T)`]. If the value was [`Err(E)`], the default value provided is returned instead.
     fn unwrap_or_else(self, default: impl FnOnce(E) -> T + Send + 'static) -> BufferedCommand<T> {
-        self.add_sync_command(|t| {
-            t.unwrap_or_else(default)
-        })
+        self.add_sync_command(|t| t.unwrap_or_else(default))
     }
 
     /// Unwraps the [`Result<T, E>`] value returned by the previous command, and returns the result if it
@@ -135,9 +135,7 @@ pub trait UnwrapOk<T: MVSynced, E: MVSynced + Debug>: Command<Result<T, E>> {
     /// [`TaskHandle<T>`]: crate::task::TaskHandle
     fn expect(self, msg: &str) -> BufferedCommand<T> {
         let msg = msg.to_string();
-        self.add_sync_command(move |t| {
-            t.expect(&msg)
-        })
+        self.add_sync_command(move |t| t.expect(&msg))
     }
 }
 
@@ -150,9 +148,7 @@ pub trait UnwrapErr<T: MVSynced + Debug, E: MVSynced>: Command<Result<T, E>> {
     ///
     /// [`TaskHandle<T>`]: crate::task::TaskHandle
     fn unwrap_err(self) -> BufferedCommand<E> {
-        self.add_sync_command(|t| {
-            t.unwrap_err()
-        })
+        self.add_sync_command(|t| t.unwrap_err())
     }
 
     /// Unwraps the [`Result<T, E>`] error value returned by the previous command, and returns the result if it
@@ -162,9 +158,7 @@ pub trait UnwrapErr<T: MVSynced + Debug, E: MVSynced>: Command<Result<T, E>> {
     /// [`TaskHandle<T>`]: crate::task::TaskHandle
     fn expect_err(self, msg: &str) -> BufferedCommand<E> {
         let msg = msg.to_string();
-        self.add_sync_command(move |t| {
-            t.expect_err(&msg)
-        })
+        self.add_sync_command(move |t| t.expect_err(&msg))
     }
 }
 
